@@ -43,6 +43,10 @@ test-data/
 - `ONLY_JPG` 和 `ONLY_RAW` 被正确分类并在配对检查中分别报告。
 - `ignored.txt` 和 `nested` 内文件不动。
 - 预先制造目标同名冲突时不覆盖。
+- “取消分类”将 `jpg` / `arw` 照片还原到根目录，并保持内容哈希不变。
+- 创建或取消分类后，已有 JPG 的 P/X/星级标记仍绑定到移动后的正确路径。
+- 根目录存在任一同名冲突时，“取消分类”在移动任何文件之前停止。
+- 完整还原后只删除已经为空的 `jpg` / `arw` 文件夹。
 
 ## 3. 文件操作
 
@@ -75,7 +79,8 @@ test-data/
 - 左侧固定区无滚动条。
 - 右侧只有一条窄的迷你滚动条。
 - 四档缩略图大小都不裁切文件名或徽标。
-- 名称/修改时间升降序正确。
+- 名称/EXIF 拍摄时间升降序正确；文件修改时间不得影响拍摄时间排序。
+- 无有效 EXIF 拍摄时间的 JPG 在升序和降序中都排列在末尾，并以名称稳定排序。
 - 五种筛选计数和内容正确。
 
 ## 6. 单张视图
@@ -106,7 +111,7 @@ test-data/
 
 设置一个非默认组合后关闭并重开：
 
-- 暗色/浅色。
+- 固定暗黑模式，界面中没有主题切换按钮。
 - 最近路径顺序。
 - 网格尺寸和排序/筛选。
 - 单张模式、当前照片和固定缩放倍率。
@@ -118,7 +123,7 @@ test-data/
 
 实际启动测试版并截图检查：
 
-- 暗色和浅色。
+- 暗黑模式。
 - 横构图和竖构图。
 - 网格和单张。
 - 默认/最小/最大化窗口。
@@ -136,7 +141,7 @@ Classification fixture: PASS/FAIL
 Recycle Bin safety: PASS/FAIL
 Grid/single keyboard: PASS/FAIL
 Portrait/landscape orientation: PASS/FAIL
-Dark/light visual QA: PASS/FAIL
+Dark visual QA: PASS/FAIL
 State restoration: PASS/FAIL
 Known gaps: ...
 ```

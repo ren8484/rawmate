@@ -66,6 +66,7 @@ internal sealed class MainWindow : Window
     private TextBlock photoInfoTitle = new TextBlock();
     private TextBlock photoInfo = new TextBlock();
     private Button organizeButton = new Button();
+    private Button unorganizeButton = new Button();
     private Button recycleSelectedButton = new Button();
     private Button recycleRejectedButton = new Button();
     private Button filterButton = new Button();
@@ -110,6 +111,7 @@ internal sealed class MainWindow : Window
     private readonly Dictionary<string, BitmapSource> fullImageCache = new Dictionary<string, BitmapSource>(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, Task<BitmapSource>> fullImageLoadTasks = new Dictionary<string, Task<BitmapSource>>(StringComparer.OrdinalIgnoreCase);
     private readonly LinkedList<string> fullImageCacheLru = new LinkedList<string>();
+    private readonly Dictionary<string, DateTime?> captureDateCache = new Dictionary<string, DateTime?>(StringComparer.OrdinalIgnoreCase);
     private int fullImageCacheGeneration;
     private readonly List<string> recentFolders = new List<string>();
     private readonly string settingsPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RAWMate", "settings.txt");
@@ -119,7 +121,7 @@ internal sealed class MainWindow : Window
     private string gallerySortMode = "name_asc";
     private double gridTileWidth = 196;
     private bool autoAdvanceEnabled;
-    private static bool darkMode;
+    private static readonly bool darkMode = true;
 
     private static readonly string[] JpgExtensions = { ".jpg", ".jpeg" };
     private static readonly string[] RawExtensions = { ".arw" };
@@ -141,7 +143,7 @@ internal sealed class MainWindow : Window
         SnapsToDevicePixels = true;
         try { Icon = BitmapFrame.Create(new Uri(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "RAWMate.ico"), UriKind.Absolute)); } catch { }
         Content = BuildUi();
-        SetStatus("选择一个相机照片目录，然后先扫描或分类。", false);
+        SetStatus("选择一个相机照片目录，然后扫描或创建分类。", false);
         PreviewKeyDown += MainWindowPreviewKeyDown;
         Loaded += delegate
         {
@@ -183,19 +185,10 @@ internal sealed class MainWindow : Window
         var panel = new StackPanel();
         var brand = new Grid { Margin = new Thickness(2, 1, 2, 18) };
         brand.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        brand.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         var text = new StackPanel();
         text.Children.Add(new TextBlock { Text = "RAWMate", FontSize = 24, FontWeight = FontWeights.SemiBold, Foreground = Brush("#1F2937") });
         text.Children.Add(new TextBlock { Text = "JPG / ARW 照片挑片", Margin = new Thickness(0, 3, 0, 0), FontSize = 12, Foreground = Brush("#6A7787") });
         brand.Children.Add(text);
-        var themeButton = new Button { Content = CreateThemeIcon() };
-        StyleThemeButton(themeButton);
-        themeButton.ToolTip = darkMode ? "切换浅色模式" : "切换暗黑模式";
-        themeButton.VerticalAlignment = VerticalAlignment.Center;
-        themeButton.Margin = new Thickness(0);
-        themeButton.Click += ToggleTheme;
-        Grid.SetColumn(themeButton, 1);
-        brand.Children.Add(themeButton);
         panel.Children.Add(brand);
         panel.Children.Add(BuildPathCard());
         panel.Children.Add(Divider());
@@ -254,6 +247,7 @@ internal sealed class MainWindow : Window
         panel.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         panel.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         panel.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        panel.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         panel.Children.Add(SectionTitle("目录概览"));
 
         var stats = new Grid { Margin = new Thickness(2, 12, 2, 0) };
@@ -270,7 +264,7 @@ internal sealed class MainWindow : Window
         stats.Children.Add(statC);
         Grid.SetRow(stats, 1);
         panel.Children.Add(stats);
-        organizeButton.Content = "分类";
+        organizeButton.Content = "创建分类";
         StyleButton(organizeButton, true, 0);
         organizeButton.HorizontalAlignment = HorizontalAlignment.Stretch;
         organizeButton.Margin = new Thickness(0, 14, 0, 0);
@@ -278,6 +272,14 @@ internal sealed class MainWindow : Window
         organizeButton.Click += OrganizeFiles;
         Grid.SetRow(organizeButton, 2);
         panel.Children.Add(organizeButton);
+        unorganizeButton.Content = "取消分类";
+        StyleButton(unorganizeButton, true, 0);
+        unorganizeButton.HorizontalAlignment = HorizontalAlignment.Stretch;
+        unorganizeButton.Margin = new Thickness(0, 8, 0, 0);
+        unorganizeButton.Click -= UnorganizeFiles;
+        unorganizeButton.Click += UnorganizeFiles;
+        Grid.SetRow(unorganizeButton, 3);
+        panel.Children.Add(unorganizeButton);
         return panel;
     }
 
@@ -296,7 +298,7 @@ internal sealed class MainWindow : Window
         title.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         title.Children.Add(SectionTitle("图库"));
         var topRight = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-        galleryCaption.Text = tileFiles.Count > 0 ? tileFiles.Count + " 张 JPG · 单击选择，双击进入单张视图" : "分类完成后，这里会显示缩略图。";
+        galleryCaption.Text = tileFiles.Count > 0 ? tileFiles.Count + " 张 JPG · 单击选择，双击进入单张视图" : "创建分类后，这里会显示缩略图。";
         galleryCaption.Foreground = Brush("#66778B");
         galleryCaption.VerticalAlignment = VerticalAlignment.Center;
         topRight.Children.Add(galleryCaption);
@@ -622,8 +624,8 @@ internal sealed class MainWindow : Window
             var menu = new ContextMenu { PlacementTarget = button, Placement = PlacementMode.Bottom, Background = Brush("#FFFFFF"), BorderBrush = Brush("#D9E2EC"), BorderThickness = new Thickness(1) };
             AddSortMenuItem(menu, "名称升序", "name_asc");
             AddSortMenuItem(menu, "名称降序", "name_desc");
-            AddSortMenuItem(menu, "修改时间升序", "modified_asc");
-            AddSortMenuItem(menu, "修改时间降序", "modified_desc");
+            AddSortMenuItem(menu, "拍摄时间升序", "capture_asc");
+            AddSortMenuItem(menu, "拍摄时间降序", "capture_desc");
             menu.IsOpen = true;
         };
         return button;
@@ -647,8 +649,8 @@ internal sealed class MainWindow : Window
         switch (gallerySortMode)
         {
             case "name_desc": return "名称 ↓";
-            case "modified_asc": return "时间 ↑";
-            case "modified_desc": return "时间 ↓";
+            case "capture_asc": return "拍摄时间 ↑";
+            case "capture_desc": return "拍摄时间 ↓";
             default: return "名称 ↑";
         }
     }
@@ -979,7 +981,7 @@ internal sealed class MainWindow : Window
     {
         ClearFullImageCache();
         ClearGallery();
-        SetStatus("目录已变更，请扫描或分类。", false);
+        SetStatus("目录已变更，请扫描或创建分类。", false);
     }
 
     private void OpenFolderHistory(object sender, RoutedEventArgs e)
@@ -1002,18 +1004,6 @@ internal sealed class MainWindow : Window
             }
         }
         menu.IsOpen = true;
-    }
-
-    private void ToggleTheme(object sender, RoutedEventArgs e)
-    {
-        var currentFolder = folderBox.Text;
-        darkMode = !darkMode;
-        SaveSettings();
-        Background = Brush("#F4F7FB");
-        ResetUiControls(currentFolder);
-        Content = BuildUi();
-        if (Directory.Exists(currentFolder.Trim())) RefreshCurrentFolder();
-        else SetStatus("选择一个相机照片目录，然后先扫描或分类。", false);
     }
 
     private void ResetUiControls(string currentFolder)
@@ -1040,6 +1030,7 @@ internal sealed class MainWindow : Window
         navigatorDragging = false;
         navigatorUpdateQueued = false;
         organizeButton = new Button();
+        unorganizeButton = new Button();
         recycleSelectedButton = new Button();
         recycleRejectedButton = new Button();
         filterButton = new Button();
@@ -1076,9 +1067,7 @@ internal sealed class MainWindow : Window
             if (!File.Exists(settingsPath)) return;
             foreach (var line in File.ReadAllLines(settingsPath))
             {
-                if (line.StartsWith("theme=", StringComparison.OrdinalIgnoreCase))
-                    darkMode = String.Equals(line.Substring(6), "dark", StringComparison.OrdinalIgnoreCase);
-                else if (line.StartsWith("last_folder=", StringComparison.OrdinalIgnoreCase))
+                if (line.StartsWith("last_folder=", StringComparison.OrdinalIgnoreCase))
                     lastFolder = line.Substring(12);
                 else if (line.StartsWith("view=", StringComparison.OrdinalIgnoreCase))
                     singleViewMode = String.Equals(line.Substring(5), "single", StringComparison.OrdinalIgnoreCase);
@@ -1122,7 +1111,7 @@ internal sealed class MainWindow : Window
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(settingsPath));
-            var lines = new List<string> { "theme=" + (darkMode ? "dark" : "light") };
+            var lines = new List<string>();
             var currentFolder = folderBox == null ? lastFolder : (folderBox.Text ?? String.Empty).Trim();
             lines.Add("last_folder=" + (currentFolder ?? String.Empty));
             lines.Add("view=" + (singleViewMode ? "single" : "grid"));
@@ -1144,9 +1133,14 @@ internal sealed class MainWindow : Window
         switch ((value ?? String.Empty).ToLowerInvariant())
         {
             case "name_desc":
-            case "modified_asc":
-            case "modified_desc":
+            case "capture_asc":
+            case "capture_desc":
                 return value.ToLowerInvariant();
+            // Migrate the two former modification-time settings to EXIF capture-time sorting.
+            case "modified_asc":
+                return "capture_asc";
+            case "modified_desc":
+                return "capture_desc";
             default:
                 return "name_asc";
         }
@@ -1172,7 +1166,7 @@ internal sealed class MainWindow : Window
         if (!Directory.Exists(folder))
         {
             singleViewMode = false;
-            SetStatus("选择一个相机照片目录，然后先扫描或分类。", false);
+            SetStatus("选择一个相机照片目录，然后扫描或创建分类。", false);
             return;
         }
 
@@ -1250,13 +1244,44 @@ internal sealed class MainWindow : Window
         {
             case "name_desc":
                 return source.OrderByDescending(Path.GetFileName, StringComparer.OrdinalIgnoreCase).ToList();
-            case "modified_asc":
-                return source.OrderBy(File.GetLastWriteTimeUtc).ThenBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase).ToList();
-            case "modified_desc":
-                return source.OrderByDescending(File.GetLastWriteTimeUtc).ThenBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase).ToList();
+            case "capture_asc":
+                return source.OrderBy(CaptureSortBucket).ThenBy(CaptureSortValue).ThenBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase).ToList();
+            case "capture_desc":
+                return source.OrderBy(CaptureSortBucket).ThenByDescending(CaptureSortValue).ThenBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase).ToList();
             default:
                 return source.OrderBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase).ToList();
         }
+    }
+
+    private int CaptureSortBucket(string file)
+    {
+        return ReadCaptureDate(file).HasValue ? 0 : 1;
+    }
+
+    private DateTime CaptureSortValue(string file)
+    {
+        return ReadCaptureDate(file) ?? DateTime.MinValue;
+    }
+
+    private DateTime? ReadCaptureDate(string file)
+    {
+        DateTime? cached;
+        if (captureDateCache.TryGetValue(file, out cached)) return cached;
+        DateTime? result = null;
+        try
+        {
+            using (var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+            {
+                var decoder = BitmapDecoder.Create(stream, BitmapCreateOptions.PreservePixelFormat, BitmapCacheOption.OnDemand);
+                var metadata = decoder.Frames.Count > 0 ? decoder.Frames[0].Metadata as BitmapMetadata : null;
+                result = ParseExifDate(ReadMetadataValue(metadata, "/app1/ifd/exif/{ushort=36867}"));
+                if (!result.HasValue) result = ParseExifDate(ReadMetadataValue(metadata, "/app1/ifd/exif/{ushort=36868}"));
+                if (!result.HasValue) result = ParseExifDate(ReadMetadataValue(metadata, "/app1/ifd/{ushort=306}"));
+            }
+        }
+        catch { }
+        captureDateCache[file] = result;
+        return result;
     }
 
     private void ScanDirectory()
@@ -1274,6 +1299,10 @@ internal sealed class MainWindow : Window
         jpgCount.Text = jpgTotal.ToString("N0") + " 张";
         rawCount.Text = rawTotal.ToString("N0") + " 张";
         pendingCount.Text = (pendingJpg + pendingRaw).ToString("N0") + " 个";
+        organizeButton.IsHitTestVisible = pendingJpg + pendingRaw > 0;
+        organizeButton.Opacity = pendingJpg + pendingRaw > 0 ? 1.0 : 0.52;
+        unorganizeButton.IsHitTestVisible = jpgTotal + rawTotal > 0;
+        unorganizeButton.Opacity = jpgTotal + rawTotal > 0 ? 1.0 : 0.52;
         folderHint.Text = pendingJpg + pendingRaw > 0 ? "目录顶层有待分类的照片" : "目录顶层没有待分类照片";
         var missing = FindMissingPairs(root);
         var pairSummary = missing.Item1.Count == 0 && missing.Item2.Count == 0
@@ -1306,14 +1335,103 @@ internal sealed class MainWindow : Window
         {
             var destination = Path.Combine(root, IsJpg(file) ? "jpg" : "arw", Path.GetFileName(file));
             if (File.Exists(destination)) { skipped++; continue; }
-            try { File.Move(file, destination); moved++; }
+            try
+            {
+                File.Move(file, destination);
+                RemapPhotoState(file, destination);
+                moved++;
+            }
             catch { skipped++; }
         }
+        SaveCullMarks();
         ScanDirectory();
         RefreshGallery();
         var result = "已分类 " + moved + " 个文件。" + (skipped > 0 ? " " + skipped + " 个未移动（同名文件或访问错误）。" : "");
         SetStatus(result, false);
         MessageBox.Show(result, "分类完成", MessageBoxButton.OK, MessageBoxImage.Information);
+    }
+
+    private void UnorganizeFiles(object sender, RoutedEventArgs e)
+    {
+        var root = RootFolder(true);
+        if (root == null) return;
+        var jpgFolder = Path.Combine(root, "jpg");
+        var rawFolder = Path.Combine(root, "arw");
+        var jpgs = FilesIn(jpgFolder).Where(IsJpg).ToList();
+        var raws = FilesIn(rawFolder).Where(IsRaw).ToList();
+        if (jpgs.Count == 0 && raws.Count == 0)
+        {
+            MessageBox.Show("jpg 与 arw 文件夹中没有可还原的照片。", "没有可取消的分类", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        var conflicts = jpgs.Concat(raws).Where(file => File.Exists(Path.Combine(root, Path.GetFileName(file)))).ToList();
+        if (conflicts.Count > 0)
+        {
+            var preview = String.Join("\n", conflicts.Take(8).Select(Path.GetFileName));
+            if (conflicts.Count > 8) preview += "\n……以及另外 " + (conflicts.Count - 8) + " 个文件";
+            MessageBox.Show("根目录已存在以下同名文件，取消分类已停止，未移动任何照片：\n\n" + preview,
+                "存在同名文件", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        var message = "将把 " + jpgs.Count + " 个 JPG/JPEG 和 " + raws.Count + " 个 ARW 还原到：\n\n"
+                    + root + "\n\n此操作不会覆盖同名文件。继续吗？";
+        if (MessageBox.Show(message, "确认取消分类", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
+
+        int moved = 0;
+        var failures = new List<string>();
+        foreach (var file in jpgs.Concat(raws))
+        {
+            var destination = Path.Combine(root, Path.GetFileName(file));
+            try
+            {
+                if (File.Exists(destination)) failures.Add(Path.GetFileName(file) + "（根目录已有同名文件）");
+                else
+                {
+                    File.Move(file, destination);
+                    RemapPhotoState(file, destination);
+                    moved++;
+                }
+            }
+            catch (Exception ex) { failures.Add(Path.GetFileName(file) + "（" + ex.Message + "）"); }
+        }
+
+        SaveCullMarks();
+
+        TryDeleteEmptyPhotoFolder(jpgFolder);
+        TryDeleteEmptyPhotoFolder(rawFolder);
+
+        ScanDirectory();
+        RefreshGallery();
+        var result = "已还原 " + moved + " 个文件。";
+        if (failures.Count > 0) result += " " + failures.Count + " 个未移动：\n" + String.Join("\n", failures.Take(8));
+        SetStatus(result, failures.Count > 0);
+        MessageBox.Show(result, failures.Count > 0 ? "取消分类部分完成" : "取消分类完成", MessageBoxButton.OK,
+            failures.Count > 0 ? MessageBoxImage.Warning : MessageBoxImage.Information);
+    }
+
+    private static void TryDeleteEmptyPhotoFolder(string folder)
+    {
+        try
+        {
+            if (Directory.Exists(folder) && !Directory.EnumerateFileSystemEntries(folder).Any()) Directory.Delete(folder, false);
+        }
+        catch { }
+    }
+
+    private void RemapPhotoState(string source, string destination)
+    {
+        if (pickedFiles.Remove(source)) pickedFiles.Add(destination);
+        if (rejectedFiles.Remove(source)) rejectedFiles.Add(destination);
+        int rating;
+        if (starRatings.TryGetValue(source, out rating))
+        {
+            starRatings.Remove(source);
+            starRatings[destination] = rating;
+        }
+        if (selectedFiles.Remove(source)) selectedFiles.Add(destination);
+        if (String.Equals(currentSingleFile, source, StringComparison.OrdinalIgnoreCase)) currentSingleFile = destination;
     }
 
     private void RefreshGallery()
@@ -1327,7 +1445,7 @@ internal sealed class MainWindow : Window
         var visibleJpgs = jpgs.Where(MatchesFilter).ToList();
         if (visibleJpgs.Count == 0)
         {
-            gallery.Children.Add(new TextBlock { Text = jpgs.Count == 0 ? "这里还没有 JPG。点击“分类”即可。" : "当前筛选没有匹配的照片。", Margin = new Thickness(20), FontSize = 15, Foreground = Brush("#6A7787") });
+            gallery.Children.Add(new TextBlock { Text = jpgs.Count == 0 ? "这里还没有 JPG。点击“创建分类”即可。" : "当前筛选没有匹配的照片。", Margin = new Thickness(20), FontSize = 15, Foreground = Brush("#6A7787") });
             galleryCaption.Text = jpgs.Count == 0 ? "没有可浏览的 JPG" : "筛选：" + FilterLabel() + " · 0 张";
             return;
         }
@@ -1762,7 +1880,7 @@ internal sealed class MainWindow : Window
                 RestoreGridCurrentPhoto();
             }
         }
-        else SetStatus("选择一个相机照片目录，然后先扫描或分类。", false);
+        else SetStatus("选择一个相机照片目录，然后扫描或创建分类。", false);
     }
 
     private void NavigateSingle(int direction)
@@ -1888,6 +2006,7 @@ internal sealed class MainWindow : Window
             fullImageLoadTasks.Clear();
             fullImageCacheLru.Clear();
         }
+        captureDateCache.Clear();
     }
 
     private void SingleViewerMouseWheel(object sender, MouseWheelEventArgs e)
@@ -2240,6 +2359,7 @@ internal sealed class MainWindow : Window
         catch { }
 
         var date = FormatExifDate(ReadMetadataValue(metadata, "/app1/ifd/exif/{ushort=36867}"));
+        if (date == "—") date = FormatExifDate(ReadMetadataValue(metadata, "/app1/ifd/exif/{ushort=36868}"));
         if (date == "—") date = FormatExifDate(ReadMetadataValue(metadata, "/app1/ifd/{ushort=306}"));
         var model = ToDisplayText(ReadMetadataValue(metadata, "/app1/ifd/{ushort=272}"));
         var iso = ToDisplayText(ReadMetadataValue(metadata, "/app1/ifd/exif/{ushort=34855}"));
@@ -2272,10 +2392,19 @@ internal sealed class MainWindow : Window
     {
         var text = ToDisplayText(value);
         if (text == "—") return text;
+        var date = ParseExifDate(value);
+        if (date.HasValue) return date.Value.ToString("yyyy/M/d HH:mm", CultureInfo.InvariantCulture);
+        return text;
+    }
+
+    private static DateTime? ParseExifDate(object value)
+    {
+        var text = ToDisplayText(value);
+        if (text == "—") return null;
         DateTime date;
         if (DateTime.TryParseExact(text, new[] { "yyyy:MM:dd HH:mm:ss", "yyyy-MM-dd HH:mm:ss" }, CultureInfo.InvariantCulture, DateTimeStyles.None, out date))
-            return date.ToString("yyyy/M/d HH:mm", CultureInfo.InvariantCulture);
-        return text;
+            return date;
+        return null;
     }
 
     private static bool TryGetRational(object value, out double number, out uint numerator, out uint denominator)
@@ -2405,29 +2534,6 @@ internal sealed class MainWindow : Window
         button.Template = template;
     }
 
-    private static void StyleThemeButton(Button button)
-    {
-        button.Width = 52;
-        button.Height = 52;
-        button.Padding = new Thickness(0);
-        button.Cursor = Cursors.Hand;
-        button.BorderThickness = new Thickness(0);
-        button.Background = Brush("#EAF1F8");
-        button.Foreground = Brush("#245F98");
-        var border = new FrameworkElementFactory(typeof(Border));
-        border.SetValue(Border.CornerRadiusProperty, new CornerRadius(26));
-        border.SetValue(Border.BackgroundProperty, Brush("#EAF1F8"));
-        border.SetValue(Border.BorderBrushProperty, Brush("#D9E2EC"));
-        border.SetValue(Border.BorderThicknessProperty, new Thickness(1));
-        var presenter = new FrameworkElementFactory(typeof(ContentPresenter));
-        presenter.SetValue(ContentPresenter.HorizontalAlignmentProperty, HorizontalAlignment.Center);
-        presenter.SetValue(ContentPresenter.VerticalAlignmentProperty, VerticalAlignment.Center);
-        border.AppendChild(presenter);
-        var template = new ControlTemplate(typeof(Button));
-        template.VisualTree = border;
-        button.Template = template;
-    }
-
     private static void StyleViewButton(Button button)
     {
         var border = new FrameworkElementFactory(typeof(Border));
@@ -2511,45 +2617,6 @@ internal sealed class MainWindow : Window
         var template = new ControlTemplate(typeof(MenuItem));
         template.VisualTree = border;
         item.Template = template;
-    }
-
-    private static UIElement CreateThemeIcon()
-    {
-        return darkMode ? CreateSunIcon() : CreateMoonIcon();
-    }
-
-    private static UIElement CreateMoonIcon()
-    {
-        var canvas = new Canvas { Width = 28, Height = 28 };
-        var outer = new System.Windows.Shapes.Ellipse { Width = 18, Height = 18, Fill = Brush("#2678D4") };
-        Canvas.SetLeft(outer, 4);
-        Canvas.SetTop(outer, 5);
-        canvas.Children.Add(outer);
-        var cutout = new System.Windows.Shapes.Ellipse { Width = 18, Height = 18, Fill = Brush("#EAF1F8") };
-        Canvas.SetLeft(cutout, 10);
-        Canvas.SetTop(cutout, 2);
-        canvas.Children.Add(cutout);
-        return canvas;
-    }
-
-    private static UIElement CreateSunIcon()
-    {
-        var canvas = new Canvas { Width = 28, Height = 28 };
-        var color = Brush("#2678D4");
-        for (var index = 0; index < 8; index++)
-        {
-            var angle = (Math.PI * 2 * index) / 8;
-            var x1 = 14 + Math.Cos(angle) * 9;
-            var y1 = 14 + Math.Sin(angle) * 9;
-            var x2 = 14 + Math.Cos(angle) * 12;
-            var y2 = 14 + Math.Sin(angle) * 12;
-            canvas.Children.Add(new System.Windows.Shapes.Line { X1 = x1, Y1 = y1, X2 = x2, Y2 = y2, Stroke = color, StrokeThickness = 2, StrokeStartLineCap = PenLineCap.Round, StrokeEndLineCap = PenLineCap.Round });
-        }
-        var core = new System.Windows.Shapes.Ellipse { Width = 11, Height = 11, Fill = color };
-        Canvas.SetLeft(core, 8.5);
-        Canvas.SetTop(core, 8.5);
-        canvas.Children.Add(core);
-        return canvas;
     }
 
     private static SolidColorBrush Brush(string hex)
