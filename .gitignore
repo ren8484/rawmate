@@ -2,6 +2,7 @@
 RAWMate.exe
 RAWMate-Test.exe
 *.pdb
+dist/
 
 # IDE/build state
 .vs/
