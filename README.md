@@ -2,6 +2,8 @@
 
 RAWMate 是一款本地运行的 Windows JPG + Sony ARW 照片挑选工具。它先把相机照片分到 `jpg` 与 `arw` 文件夹，再用 JPG 快速挑片；淘汰照片时，可以把 JPG 和同名 ARW 一起移入 Windows 回收站。
 
+当前正式版本：`1.0.0`（Windows 文件版本 `1.0.0.0`）。
+
 ## 主要功能
 
 - 分类根目录顶层的 JPG/JPEG 与 ARW，不覆盖同名文件。
@@ -61,6 +63,8 @@ BUILD_RAWMate.cmd
 ```
 
 构建使用 Windows 自带的 64 位 .NET Framework C# 编译器。完整流程见 [docs/TESTING.md](docs/TESTING.md) 与 [docs/RELEASE.md](docs/RELEASE.md)。
+
+推荐把开发仓库克隆到 `C:\rawmate`。两台电脑均使用相同路径，可以减少脚本、快捷方式和交接说明的差异。
 
 ## 项目文档
 

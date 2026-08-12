@@ -13,6 +13,8 @@ RAWMate PC 是一个本地、离线、无第三方依赖的 Windows WPF 照片�
 - 当前主源码是 `RAWMate.cs`，约 2,500 行，界面和业务逻辑都在这一文件中。
 - 当前构建不依赖 Visual Studio 项目、NuGet、网络服务、数据库或云端账号。
 - 当前用户主要环境：Windows、Sony ILCE-6700，JPG 色彩空间 sRGB，Dell U2725QM 显示器使用 sRGB 模式。
+- 当前正式版本：`1.0.0`；Windows Assembly/FileVersion 为 `1.0.0.0`。
+- 当前标准本地仓库路径：`C:\rawmate`。旧开发目录只作历史快照，不再作为修改入口。
 
 ## 3. 产品缘起与目标
 
@@ -195,6 +197,7 @@ Moon/
 - `RAWMate.ico` 必须嵌入 EXE；运行目录保留 `RAWMateHeader.png` 可显示界面徽标。
 - 正式桌面快捷方式名称固定为 `RAWMate`。
 - Git 仓库不跟踪 EXE；GitHub Actions 构建测试产物，正式 EXE应通过 Release 发布。
+- GitHub 正式标签使用三段语义版本（如 `v1.0.0`）；Windows 文件属性使用四段版本（如 `1.0.0.0`）。
 
 ## 11. 当前已知限制与风险
 

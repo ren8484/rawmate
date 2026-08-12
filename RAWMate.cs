@@ -8,6 +8,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Reflection;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
@@ -18,6 +19,15 @@ using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using Forms = System.Windows.Forms;
+
+[assembly: AssemblyTitle("RAWMate")]
+[assembly: AssemblyDescription("JPG / Sony ARW photo culling and organization tool")]
+[assembly: AssemblyCompany("ren8484")]
+[assembly: AssemblyProduct("RAWMate")]
+[assembly: AssemblyCopyright("Copyright © 2026 ren8484")]
+[assembly: AssemblyVersion("1.0.0.0")]
+[assembly: AssemblyFileVersion("1.0.0.0")]
+[assembly: AssemblyInformationalVersion("1.0.0")]
 
 internal static class Program
 {

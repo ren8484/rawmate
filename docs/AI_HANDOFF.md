@@ -7,6 +7,8 @@
 ```text
 这是 Windows PC 版 RAWMate 项目，其他平台不在范围内。
 
+标准本地仓库路径是 C:\rawmate；旧开发目录仅为历史快照。
+
 请先完整阅读并遵守：
 1. AGENTS.md
 2. PROJECT_CONTEXT.md

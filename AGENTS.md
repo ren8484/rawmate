@@ -9,6 +9,7 @@
 - 界面徽标：`RAWMateHeader.png`
 - 固定测试产物：`RAWMate-Test.exe`
 - 正式产物：`RAWMate.exe`
+- 当前标准工作目录：`C:\rawmate`
 - 测试构建入口：`BUILD_RAWMate-Test.cmd`
 - 正式构建入口：`BUILD_RAWMate.cmd`
 - 原始本地工作目录可能保留 `RAW_JPG_整理助手.py`、`启动_RAW_JPG_整理助手.cmd` 和旧 `使用说明.md`。它们是早期 Python 原型，只作历史参考，已被 `.gitignore` 排除，不是后续开发入口。
@@ -25,6 +26,7 @@
 6. 将测试结果交给用户确认。用户明确同意正式发布后，才可运行 `BUILD_RAWMate.cmd` 覆盖 `RAWMate.exe`。
 7. 正式发布后同步 `CHANGELOG.md`；若产品行为或长期决策改变，还要同步 `PROJECT_CONTEXT.md` 和相关 `docs/`。
 8. 若创建桌面快捷方式，名称只能是 `RAWMate`，不添加“照片工具”等后缀，目标必须是正式 `RAWMate.exe`。
+9. 日常开发只在 `C:\rawmate` 进行；旧目录是历史快照，不再提交或构建。
 
 ## 3. 文件安全边界
 

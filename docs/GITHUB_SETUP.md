@@ -51,6 +51,24 @@ gh repo create RAWMate --private --source . --remote origin --push
 
 这些命令会对外创建/推送仓库，应由用户明确授权后执行。
 
+## 两台电脑的标准路径
+
+家里电脑和公司备用个人电脑都统一使用：
+
+```text
+C:\rawmate
+```
+
+公司电脑首次使用时，在管理员或有权写入 `C:\` 的 PowerShell 中执行：
+
+```powershell
+git clone https://github.com/ren8484/rawmate.git C:\rawmate
+cd C:\rawmate
+.\BUILD_RAWMate-Test.cmd
+```
+
+如果 `C:\rawmate` 已存在，先检查其中是否有需要保留的文件；不要直接克隆覆盖非空目录。
+
 ## 4. 首次远程核验
 
 1. Actions 中 `Windows test build` 成功。
@@ -62,4 +80,3 @@ gh repo create RAWMate --private --source . --remote origin --push
 ## 5. 与 Web ChatGPT 协作
 
 连接 GitHub 后，让 Web ChatGPT 先阅读 `AGENTS.md` 和 `PROJECT_CONTEXT.md`。每次任务使用 `docs/AI_HANDOFF.md` 模板，明确本轮是只读诊断、测试版修改还是正式发布。
-
