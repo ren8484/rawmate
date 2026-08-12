@@ -1,0 +1,54 @@
+name: Bug report
+description: 报告 RAWMate PC 可复现的问题
+title: "[Bug] "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: 请勿上传唯一原片；涉及删除时只使用可恢复测试文件。
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      placeholder: 1. 选择目录…
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期结果
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际结果
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Windows、DPI 与窗口状态
+      placeholder: Windows 11, 150%, 最大化
+  - type: dropdown
+    id: view
+    attributes:
+      label: 视图
+      options: [网格, 单张, 两者, 不适用]
+  - type: dropdown
+    id: theme
+    attributes:
+      label: 主题
+      options: [暗色, 浅色, 两者, 不适用]
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 截图、日志与样本说明
+      description: 可粘贴 error.log 相关片段，但请先检查隐私。
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: 文件安全
+      options:
+        - label: 若问题涉及清理，我使用的是可恢复测试文件并检查了 Windows 回收站。
+

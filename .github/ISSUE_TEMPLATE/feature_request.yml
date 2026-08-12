@@ -1,0 +1,34 @@
+name: Feature request
+description: 为 RAWMate PC 提议功能或交互改进
+title: "[Feature] "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 想解决的问题
+    validations:
+      required: true
+  - type: textarea
+    id: workflow
+    attributes:
+      label: 期望工作流
+      description: 请说明入口、操作、结果和状态记忆。
+    validations:
+      required: true
+  - type: dropdown
+    id: location
+    attributes:
+      label: 建议位置
+      options: [左侧栏, 网格视图, 单张视图, 右键菜单, 后台逻辑, 其他]
+  - type: textarea
+    id: safety
+    attributes:
+      label: 对配对、回收站和快捷键的影响
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: 范围确认
+      options:
+        - label: 这是 Windows PC 版需求，不涉及其他平台。
+          required: true

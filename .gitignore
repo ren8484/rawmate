@@ -1,0 +1,27 @@
+# Compiled delivery artifacts
+RAWMate.exe
+RAWMate-Test.exe
+*.pdb
+
+# IDE/build state
+.vs/
+bin/
+obj/
+*.user
+*.suo
+
+# Local logs and temporary files
+*.log
+*.tmp
+*.bak
+Thumbs.db
+Desktop.ini
+
+# Local test fixtures and screenshots
+test-data/
+test-output/
+
+# Retired pre-WPF prototype kept only in the original local working folder
+RAW_JPG_整理助手.py
+启动_RAW_JPG_整理助手.cmd
+使用说明.md
