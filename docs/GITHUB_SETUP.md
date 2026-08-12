@@ -69,6 +69,20 @@ cd C:\rawmate
 
 如果 `C:\rawmate` 已存在，先检查其中是否有需要保留的文件；不要直接克隆覆盖非空目录。
 
+测试版确认能够启动后，在公司电脑本地生成正式 EXE 并创建快捷方式：
+
+```powershell
+.\BUILD_RAWMate.cmd
+
+$shell = New-Object -ComObject WScript.Shell
+$shortcut = $shell.CreateShortcut((Join-Path ([Environment]::GetFolderPath('Desktop')) 'RAWMate.lnk'))
+$shortcut.TargetPath = 'C:\rawmate\RAWMate.exe'
+$shortcut.WorkingDirectory = 'C:\rawmate'
+$shortcut.IconLocation = 'C:\rawmate\RAWMate.exe,0'
+$shortcut.Description = 'RAWMate'
+$shortcut.Save()
+```
+
 ## 4. 首次远程核验
 
 1. Actions 中 `Windows test build` 成功。
