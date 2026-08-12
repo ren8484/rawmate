@@ -1,4 +1,4 @@
-# RAWMate PC
+# RAWMate
 
 RAWMate 是一款本地运行的 Windows JPG + Sony ARW 照片挑选工具。它先把相机照片分到 `jpg` 与 `arw` 文件夹，再用 JPG 快速挑片；淘汰照片时，可以把 JPG 和同名 ARW 一起移入 Windows 回收站。
 
@@ -10,6 +10,7 @@ RAWMate 是一款本地运行的 Windows JPG + Sony ARW 照片挑选工具。它
 - Lightroom 风格的网格视图和单张视图。
 - 缩略图大小、筛选和排序。
 - `P` 保留、`X/Delete` 废片、`0–5` 星级。
+- 可开启标记后自动前进，并用 `Caps Lock` 临时切换。
 - 单张缩放、平移、导航器和底部胶片条。
 - 显示日期、机型、ISO、焦段、光圈与快门。
 - 检查 JPG/ARW 缺失配对。
@@ -35,6 +36,7 @@ RAWMate 是一款本地运行的 Windows JPG + Sony ARW 照片挑选工具。它
 | `1`–`5` | 设置星级 |
 | `←` / `→` | 切换照片 |
 | `Space` | 切换网格/单张视图 |
+| `Caps Lock` | 开启/关闭标记后自动前进 |
 | `Ctrl` + 单击 | 扩展多选 |
 | `Shift` + 单击 | 范围多选 |
 
