@@ -25,9 +25,9 @@ using Forms = System.Windows.Forms;
 [assembly: AssemblyCompany("ren8484")]
 [assembly: AssemblyProduct("RAWMate")]
 [assembly: AssemblyCopyright("Copyright © 2026 ren8484")]
-[assembly: AssemblyVersion("1.0.0.0")]
-[assembly: AssemblyFileVersion("1.0.0.0")]
-[assembly: AssemblyInformationalVersion("1.0.0")]
+[assembly: AssemblyVersion("1.1.0.0")]
+[assembly: AssemblyFileVersion("1.1.0.0")]
+[assembly: AssemblyInformationalVersion("1.1.0")]
 
 internal static class Program
 {
@@ -62,13 +62,23 @@ internal sealed class MainWindow : Window
     private TextBlock jpgCount = new TextBlock();
     private TextBlock rawCount = new TextBlock();
     private TextBlock pendingCount = new TextBlock();
+    private TextBlock cullProgressCount = new TextBlock();
+    private TextBlock cullProgressPercent = new TextBlock();
+    private TextBlock pickedProgressCount = new TextBlock();
+    private TextBlock rejectedProgressCount = new TextBlock();
+    private TextBlock unprocessedProgressCount = new TextBlock();
+    private TextBlock ratedProgressCount = new TextBlock();
+    private ColumnDefinition cullProgressFillColumn = new ColumnDefinition();
+    private ColumnDefinition cullProgressRemainingColumn = new ColumnDefinition();
     private TextBlock galleryCaption = new TextBlock();
     private TextBlock photoInfoTitle = new TextBlock();
     private TextBlock photoInfo = new TextBlock();
     private Button organizeButton = new Button();
+    private Button unorganizeButton = new Button();
     private Button recycleSelectedButton = new Button();
     private Button recycleRejectedButton = new Button();
     private Button filterButton = new Button();
+    private Button autoAdvanceButton = new Button();
     private Image singleImage = new Image();
     private ScrollViewer singleViewer = new ScrollViewer();
     private TextBlock singleCaption = new TextBlock();
@@ -109,6 +119,7 @@ internal sealed class MainWindow : Window
     private readonly Dictionary<string, BitmapSource> fullImageCache = new Dictionary<string, BitmapSource>(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, Task<BitmapSource>> fullImageLoadTasks = new Dictionary<string, Task<BitmapSource>>(StringComparer.OrdinalIgnoreCase);
     private readonly LinkedList<string> fullImageCacheLru = new LinkedList<string>();
+    private readonly Dictionary<string, DateTime?> captureDateCache = new Dictionary<string, DateTime?>(StringComparer.OrdinalIgnoreCase);
     private int fullImageCacheGeneration;
     private readonly List<string> recentFolders = new List<string>();
     private readonly string settingsPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RAWMate", "settings.txt");
@@ -117,7 +128,17 @@ internal sealed class MainWindow : Window
     private string lastFolder;
     private string gallerySortMode = "name_asc";
     private double gridTileWidth = 196;
-    private static bool darkMode;
+    private bool autoAdvanceEnabled;
+    private static readonly bool darkMode = true;
+    private const double DefaultWindowWidth = 1380;
+    private const double DefaultWindowHeight = 860;
+    private const double PreferredMinimumWindowWidth = 1000;
+    private const double PreferredMinimumWindowHeight = 640;
+    private const double SidebarWidth = 320;
+    // The sidebar column also contains outer margins, border and padding; 280 DIPs
+    // matches the original usable content width so large screens are not rescaled.
+    private const double SidebarContentWidth = 280;
+    private const string ButtonBlue = "#436794";
 
     private static readonly string[] JpgExtensions = { ".jpg", ".jpeg" };
     private static readonly string[] RawExtensions = { ".arw" };
@@ -125,10 +146,7 @@ internal sealed class MainWindow : Window
     public MainWindow()
     {
         Title = "RAWMate";
-        Width = 1380;
-        Height = 860;
-        MinWidth = 1000;
-        MinHeight = 640;
+        ApplyInitialWindowSize();
         WindowStartupLocation = WindowStartupLocation.CenterScreen;
         FontFamily = new FontFamily("Microsoft YaHei UI");
         LoadSettings();
@@ -139,7 +157,7 @@ internal sealed class MainWindow : Window
         SnapsToDevicePixels = true;
         try { Icon = BitmapFrame.Create(new Uri(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "RAWMate.ico"), UriKind.Absolute)); } catch { }
         Content = BuildUi();
-        SetStatus("选择一个相机照片目录，然后先扫描或分类。", false);
+        SetStatus("选择一个相机照片目录，然后扫描或创建分类。", false);
         PreviewKeyDown += MainWindowPreviewKeyDown;
         Loaded += delegate
         {
@@ -148,14 +166,40 @@ internal sealed class MainWindow : Window
         Closing += delegate { SaveSettings(); SaveCullMarks(); };
     }
 
+    private void ApplyInitialWindowSize()
+    {
+        // WPF reports the work area in device-independent units, so this also accounts
+        // for Windows display scaling (for example 1920x1080 at 150% is about 1280x720).
+        var workArea = SystemParameters.WorkArea;
+        var availableWidth = workArea.Width > 0 ? workArea.Width : DefaultWindowWidth;
+        var availableHeight = workArea.Height > 0 ? workArea.Height : DefaultWindowHeight;
+        const double edgeAllowance = 8;
+        availableWidth = Math.Max(1, availableWidth - edgeAllowance);
+        availableHeight = Math.Max(1, availableHeight - edgeAllowance);
+
+        MinWidth = Math.Min(PreferredMinimumWindowWidth, availableWidth);
+        MinHeight = Math.Min(PreferredMinimumWindowHeight, availableHeight);
+        Width = Math.Min(DefaultWindowWidth, availableWidth);
+        Height = Math.Min(DefaultWindowHeight, availableHeight);
+    }
+
     private UIElement BuildUi()
     {
         var root = new Grid { Background = Brush("#F4F7FB") };
-        root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(320) });
+        root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(SidebarWidth) });
         root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
 
         var sidebar = new Border { Background = Brush("#FFFFFF"), BorderBrush = Brush("#D9E2EC"), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(9), Margin = new Thickness(6, 6, 3, 6), Padding = new Thickness(14), ClipToBounds = true };
-        sidebar.Child = BuildSidebar();
+        var sidebarContent = new Grid { Width = SidebarContentWidth, HorizontalAlignment = HorizontalAlignment.Left };
+        sidebarContent.Children.Add(BuildSidebar());
+        sidebar.Child = new Viewbox
+        {
+            Child = sidebarContent,
+            Stretch = Stretch.Uniform,
+            StretchDirection = StretchDirection.DownOnly,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            VerticalAlignment = VerticalAlignment.Stretch
+        };
         root.Children.Add(sidebar);
 
         var main = new Grid { Margin = new Thickness(3, 6, 6, 6) };
@@ -179,22 +223,6 @@ internal sealed class MainWindow : Window
     private UIElement BuildSidebar()
     {
         var panel = new StackPanel();
-        var brand = new Grid { Margin = new Thickness(2, 1, 2, 18) };
-        brand.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        brand.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        var text = new StackPanel();
-        text.Children.Add(new TextBlock { Text = "RAWMate", FontSize = 24, FontWeight = FontWeights.SemiBold, Foreground = Brush("#1F2937") });
-        text.Children.Add(new TextBlock { Text = "JPG / ARW 照片挑片", Margin = new Thickness(0, 3, 0, 0), FontSize = 12, Foreground = Brush("#6A7787") });
-        brand.Children.Add(text);
-        var themeButton = new Button { Content = CreateThemeIcon() };
-        StyleThemeButton(themeButton);
-        themeButton.ToolTip = darkMode ? "切换浅色模式" : "切换暗黑模式";
-        themeButton.VerticalAlignment = VerticalAlignment.Center;
-        themeButton.Margin = new Thickness(0);
-        themeButton.Click += ToggleTheme;
-        Grid.SetColumn(themeButton, 1);
-        brand.Children.Add(themeButton);
-        panel.Children.Add(brand);
         panel.Children.Add(BuildPathCard());
         panel.Children.Add(Divider());
         panel.Children.Add(BuildStatCard());
@@ -207,16 +235,18 @@ internal sealed class MainWindow : Window
     {
         var panel = new StackPanel();
         panel.Children.Add(SectionTitle("照片目录"));
-        var folderRow = new Grid { Margin = new Thickness(0, 12, 0, 0) };
+        var folderRow = new Grid();
         folderRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         folderRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(42) });
         folderBox.Height = 40;
         folderBox.FontSize = 15;
-        folderBox.Padding = new Thickness(10, 6, 10, 6);
-        folderBox.BorderBrush = darkMode ? Brush("#596675") : Brush("#B7C3D0");
+        folderBox.Padding = new Thickness(10, 0, 10, 0);
+        folderBox.VerticalContentAlignment = VerticalAlignment.Center;
+        folderBox.BorderThickness = new Thickness(0);
         folderBox.Background = darkMode ? Brush("#171D24") : Brush("#FFFFFF");
         folderBox.Foreground = darkMode ? Brush("#F0F4F8") : Brush("#1F2937");
         folderBox.CaretBrush = folderBox.Foreground;
+        StyleRoundedTextBox(folderBox, new CornerRadius(6, 0, 0, 6));
         folderBox.TextChanged -= FolderBoxTextChanged;
         folderBox.TextChanged += FolderBoxTextChanged;
         folderRow.Children.Add(folderBox);
@@ -226,32 +256,43 @@ internal sealed class MainWindow : Window
         folderHistoryButton.Click += OpenFolderHistory;
         Grid.SetColumn(folderHistoryButton, 1);
         folderRow.Children.Add(folderHistoryButton);
-        panel.Children.Add(folderRow);
+        panel.Children.Add(new Border
+        {
+            Child = folderRow,
+            Margin = new Thickness(0, 10, 0, 0),
+            BorderBrush = darkMode ? Brush("#596675") : Brush("#B7C3D0"),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(6),
+            ClipToBounds = true
+        });
         folderHint.Margin = new Thickness(2, 6, 2, 0);
         folderHint.FontSize = 12;
         folderHint.Foreground = Brush("#6A7787");
-        folderHint.Text = "选择相机照片所在的主目录";
+        folderHint.Text = "选择照片主目录";
         folderHint.TextWrapping = TextWrapping.Wrap;
         panel.Children.Add(folderHint);
+        var actions = new Grid { Margin = new Thickness(0, 10, 0, 0) };
+        actions.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        actions.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(8) });
+        actions.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         var browse = SecondaryButton("选择目录", 0);
+        browse.Height = 34;
         browse.HorizontalAlignment = HorizontalAlignment.Stretch;
-        browse.Margin = new Thickness(0, 12, 0, 0);
         browse.Click += ChooseFolder;
-        panel.Children.Add(browse);
-        var scan = PrimaryButton("扫描并刷新", 0);
+        actions.Children.Add(browse);
+        var scan = PrimaryButton("刷新目录", 0);
+        scan.Height = 34;
         scan.HorizontalAlignment = HorizontalAlignment.Stretch;
-        scan.Margin = new Thickness(0, 8, 0, 0);
         scan.Click += delegate { RefreshCurrentFolder(); };
-        panel.Children.Add(scan);
+        Grid.SetColumn(scan, 2);
+        actions.Children.Add(scan);
+        panel.Children.Add(actions);
         return panel;
     }
 
     private UIElement BuildStatCard()
     {
-        var panel = new Grid();
-        panel.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        panel.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        panel.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        var panel = new StackPanel();
         panel.Children.Add(SectionTitle("目录概览"));
 
         var stats = new Grid { Margin = new Thickness(2, 12, 2, 0) };
@@ -266,17 +307,129 @@ internal sealed class MainWindow : Window
         stats.Children.Add(statB);
         Grid.SetColumn(statC, 2);
         stats.Children.Add(statC);
-        Grid.SetRow(stats, 1);
         panel.Children.Add(stats);
-        organizeButton.Content = "分类";
+        var actions = new Grid { Margin = new Thickness(0, 12, 0, 0) };
+        actions.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        actions.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(8) });
+        actions.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        organizeButton.Content = "创建分类";
         StyleButton(organizeButton, true, 0);
+        organizeButton.Height = 34;
         organizeButton.HorizontalAlignment = HorizontalAlignment.Stretch;
-        organizeButton.Margin = new Thickness(0, 14, 0, 0);
         organizeButton.Click -= OrganizeFiles;
         organizeButton.Click += OrganizeFiles;
-        Grid.SetRow(organizeButton, 2);
-        panel.Children.Add(organizeButton);
+        actions.Children.Add(organizeButton);
+        unorganizeButton.Content = "取消分类";
+        StyleButton(unorganizeButton, true, 0);
+        unorganizeButton.Height = 34;
+        unorganizeButton.HorizontalAlignment = HorizontalAlignment.Stretch;
+        unorganizeButton.Click -= UnorganizeFiles;
+        unorganizeButton.Click += UnorganizeFiles;
+        Grid.SetColumn(unorganizeButton, 2);
+        actions.Children.Add(unorganizeButton);
+        panel.Children.Add(actions);
+        panel.Children.Add(BuildCullProgress());
         return panel;
+    }
+
+    private UIElement BuildCullProgress()
+    {
+        var panel = new StackPanel { Margin = new Thickness(0, 16, 0, 0) };
+        var header = new Grid();
+        header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        header.Children.Add(new TextBlock
+        {
+            Text = "挑片进度",
+            FontSize = 15,
+            FontWeight = FontWeights.SemiBold,
+            Foreground = Brush("#1F2937")
+        });
+        cullProgressCount.FontSize = 13;
+        cullProgressCount.FontWeight = FontWeights.SemiBold;
+        cullProgressCount.Foreground = Brush("#DCEBFA");
+        cullProgressCount.VerticalAlignment = VerticalAlignment.Center;
+        Grid.SetColumn(cullProgressCount, 1);
+        header.Children.Add(cullProgressCount);
+        panel.Children.Add(header);
+
+        var progress = new Grid
+        {
+            Background = Brushes.Transparent
+        };
+        cullProgressFillColumn = new ColumnDefinition();
+        cullProgressRemainingColumn = new ColumnDefinition();
+        progress.ColumnDefinitions.Add(cullProgressFillColumn);
+        progress.ColumnDefinitions.Add(cullProgressRemainingColumn);
+        var fill = new Border { Background = Brush(ButtonBlue), CornerRadius = new CornerRadius(5) };
+        progress.Children.Add(fill);
+        cullProgressPercent.FontSize = 12;
+        cullProgressPercent.FontWeight = FontWeights.SemiBold;
+        cullProgressPercent.Foreground = Brushes.White;
+        cullProgressPercent.HorizontalAlignment = HorizontalAlignment.Stretch;
+        cullProgressPercent.VerticalAlignment = VerticalAlignment.Center;
+        cullProgressPercent.TextAlignment = TextAlignment.Center;
+        Grid.SetColumnSpan(cullProgressPercent, 2);
+        Panel.SetZIndex(cullProgressPercent, 1);
+        progress.Children.Add(cullProgressPercent);
+        panel.Children.Add(new Border
+        {
+            Child = progress,
+            Height = 22,
+            Margin = new Thickness(0, 8, 0, 0),
+            Padding = new Thickness(1),
+            Background = Brush("#171D24"),
+            BorderBrush = Brush("#596675"),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(5),
+            ClipToBounds = true
+        });
+
+        var counts = new Grid { Margin = new Thickness(0, 9, 0, 0) };
+        for (var index = 0; index < 4; index++)
+            counts.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        AddProgressStat(counts, pickedProgressCount, "✓", "#58D26E", "保留", 0);
+        AddProgressStat(counts, rejectedProgressCount, "✕", "#F0667A", "废片", 1);
+        AddProgressStat(counts, unprocessedProgressCount, "○", "#A6AFBA", "未处理", 2);
+        AddProgressStat(counts, ratedProgressCount, "★", "#FFB84D", "已评分（可与旗标重叠）", 3);
+        panel.Children.Add(counts);
+        UpdateCullProgress();
+        return panel;
+    }
+
+    private static void AddProgressStat(Grid host, TextBlock block, string symbol, string color, string toolTip, int column)
+    {
+        block.FontSize = 12;
+        block.FontWeight = FontWeights.SemiBold;
+        block.Foreground = Brush(color);
+        block.HorizontalAlignment = column == 0 ? HorizontalAlignment.Left : column == 3 ? HorizontalAlignment.Right : HorizontalAlignment.Center;
+        block.ToolTip = toolTip;
+        block.Text = symbol + " 0";
+        Grid.SetColumn(block, column);
+        host.Children.Add(block);
+    }
+
+    private void UpdateCullProgress()
+    {
+        var currentFiles = new List<string>();
+        var root = RootFolder(false);
+        if (root != null) currentFiles = FilesIn(Path.Combine(root, "jpg")).Where(IsJpg).ToList();
+        var total = currentFiles.Count;
+        var picked = currentFiles.Count(pickedFiles.Contains);
+        var rejected = currentFiles.Count(rejectedFiles.Contains);
+        var processed = picked + rejected;
+        var unprocessed = Math.Max(0, total - processed);
+        var rated = currentFiles.Count(file => starRatings.ContainsKey(file) && starRatings[file] > 0);
+        var percent = total > 0 ? (int)Math.Round(processed * 100.0 / total) : 0;
+
+        cullProgressCount.Text = processed.ToString("N0") + " / " + total.ToString("N0");
+        cullProgressPercent.Text = percent + "%";
+        pickedProgressCount.Text = "✓ " + picked.ToString("N0");
+        rejectedProgressCount.Text = "✕ " + rejected.ToString("N0");
+        unprocessedProgressCount.Text = "○ " + unprocessed.ToString("N0");
+        ratedProgressCount.Text = "★ " + rated.ToString("N0");
+        cullProgressFillColumn.Width = new GridLength(total > 0 ? processed : 0, GridUnitType.Star);
+        cullProgressRemainingColumn.Width = new GridLength(total > 0 ? total - processed : 1, GridUnitType.Star);
     }
 
     private UIElement BuildGalleryCard()
@@ -294,13 +447,14 @@ internal sealed class MainWindow : Window
         title.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         title.Children.Add(SectionTitle("图库"));
         var topRight = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-        galleryCaption.Text = tileFiles.Count > 0 ? tileFiles.Count + " 张 JPG · 单击选择，双击进入单张视图" : "分类完成后，这里会显示缩略图。";
+        galleryCaption.Text = tileFiles.Count > 0 ? tileFiles.Count + " 张 JPG · 单击选择，双击进入单张视图" : "创建分类后，这里会显示缩略图。";
         galleryCaption.Foreground = Brush("#66778B");
         galleryCaption.VerticalAlignment = VerticalAlignment.Center;
         topRight.Children.Add(galleryCaption);
         topRight.Children.Add(BuildFilterButton());
         topRight.Children.Add(BuildSortButton());
         topRight.Children.Add(BuildThumbnailSizeButton());
+        topRight.Children.Add(BuildAutoAdvanceButton());
         topRight.Children.Add(BuildViewButton(true));
         topRight.Children.Add(BuildViewButton(false));
         Grid.SetColumn(topRight, 1);
@@ -351,6 +505,7 @@ internal sealed class MainWindow : Window
         Grid.SetColumn(singleCaption, 1);
         header.Children.Add(singleCaption);
         var topRight = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+        topRight.Children.Add(BuildAutoAdvanceButton());
         topRight.Children.Add(BuildViewButton(true));
         topRight.Children.Add(BuildViewButton(false));
         Grid.SetColumn(topRight, 2);
@@ -618,8 +773,8 @@ internal sealed class MainWindow : Window
             var menu = new ContextMenu { PlacementTarget = button, Placement = PlacementMode.Bottom, Background = Brush("#FFFFFF"), BorderBrush = Brush("#D9E2EC"), BorderThickness = new Thickness(1) };
             AddSortMenuItem(menu, "名称升序", "name_asc");
             AddSortMenuItem(menu, "名称降序", "name_desc");
-            AddSortMenuItem(menu, "修改时间升序", "modified_asc");
-            AddSortMenuItem(menu, "修改时间降序", "modified_desc");
+            AddSortMenuItem(menu, "拍摄时间升序", "capture_asc");
+            AddSortMenuItem(menu, "拍摄时间降序", "capture_desc");
             menu.IsOpen = true;
         };
         return button;
@@ -643,8 +798,8 @@ internal sealed class MainWindow : Window
         switch (gallerySortMode)
         {
             case "name_desc": return "名称 ↓";
-            case "modified_asc": return "时间 ↑";
-            case "modified_desc": return "时间 ↓";
+            case "capture_asc": return "拍摄时间 ↑";
+            case "capture_desc": return "拍摄时间 ↓";
             default: return "名称 ↑";
         }
     }
@@ -666,6 +821,44 @@ internal sealed class MainWindow : Window
             menu.IsOpen = true;
         };
         return button;
+    }
+
+    private Button BuildAutoAdvanceButton()
+    {
+        autoAdvanceButton = new Button
+        {
+            Width = 88,
+            Height = 28,
+            FontSize = 11,
+            FontWeight = FontWeights.SemiBold,
+            Margin = new Thickness(8, 0, 0, 0),
+            Padding = new Thickness(0),
+            Cursor = Cursors.Hand,
+            BorderThickness = new Thickness(1),
+            ToolTip = "Caps Lock 切换自动前进"
+        };
+        UpdateAutoAdvanceButtonAppearance();
+        autoAdvanceButton.Click += delegate { ToggleAutoAdvance(); };
+        return autoAdvanceButton;
+    }
+
+    private void UpdateAutoAdvanceButtonAppearance()
+    {
+        if (autoAdvanceButton == null) return;
+        autoAdvanceButton.Content = autoAdvanceEnabled ? "自动前进 开" : "自动前进 关";
+        autoAdvanceButton.Background = Brush(ButtonBlue);
+        autoAdvanceButton.BorderBrush = autoAdvanceEnabled ? Brush("#A9C7E8") : Brush(ButtonBlue);
+        autoAdvanceButton.Foreground = Brushes.White;
+        autoAdvanceButton.Opacity = autoAdvanceEnabled ? 1.0 : 0.82;
+        ApplyRoundedButtonTemplate(autoAdvanceButton, 7);
+    }
+
+    private void ToggleAutoAdvance()
+    {
+        autoAdvanceEnabled = !autoAdvanceEnabled;
+        SaveSettings();
+        UpdateAutoAdvanceButtonAppearance();
+        SetStatus("自动前进已" + (autoAdvanceEnabled ? "开启" : "关闭") + "。Caps Lock 可随时切换。", false);
     }
 
     private void AddThumbnailSizeMenuItem(ContextMenu menu, string text, double width)
@@ -836,9 +1029,10 @@ internal sealed class MainWindow : Window
         button.Padding = new Thickness(0, -2, 0, 0);
         button.Cursor = Cursors.Hand;
         button.BorderThickness = new Thickness(1);
-        button.Background = active ? Brush("#2678D4") : Brush("#EAF1F8");
-        button.BorderBrush = active ? Brush("#2678D4") : Brush("#D9E2EC");
-        button.Foreground = active ? Brushes.White : Brush("#245F98");
+        button.Background = Brush(ButtonBlue);
+        button.BorderBrush = active ? Brush("#A9C7E8") : Brush(ButtonBlue);
+        button.Foreground = Brushes.White;
+        button.Opacity = active ? 1.0 : 0.82;
         StyleViewButton(button);
         button.Click += delegate { SetViewMode(!gridView); };
         return button;
@@ -846,7 +1040,7 @@ internal sealed class MainWindow : Window
 
     private static Button SingleToolButton(string text, double width, string toolTip)
     {
-        var button = new Button { Content = text, Width = width, Height = 26, ToolTip = toolTip, Cursor = Cursors.Hand, FontSize = 13, FontWeight = FontWeights.SemiBold, Padding = new Thickness(0), Background = Brush("#303A46"), Foreground = Brush("#DCEBFA"), BorderThickness = new Thickness(0) };
+        var button = new Button { Content = text, Width = width, Height = 26, ToolTip = toolTip, Cursor = Cursors.Hand, FontSize = 13, FontWeight = FontWeights.SemiBold, Padding = new Thickness(0), Background = Brush(ButtonBlue), Foreground = Brushes.White, BorderThickness = new Thickness(0) };
         var border = new FrameworkElementFactory(typeof(Border));
         border.SetValue(Border.CornerRadiusProperty, new CornerRadius(4));
         border.SetValue(Border.BackgroundProperty, button.Background);
@@ -871,6 +1065,24 @@ internal sealed class MainWindow : Window
         host.Name = "PART_ContentHost";
         host.SetValue(ScrollViewer.BackgroundProperty, Brushes.Transparent);
         host.SetValue(ScrollViewer.VerticalContentAlignmentProperty, VerticalAlignment.Center);
+        border.AppendChild(host);
+        var template = new ControlTemplate(typeof(TextBox));
+        template.VisualTree = border;
+        box.Template = template;
+    }
+
+    private static void StyleRoundedTextBox(TextBox box, CornerRadius radius)
+    {
+        var border = new FrameworkElementFactory(typeof(Border));
+        border.SetValue(Border.CornerRadiusProperty, radius);
+        border.SetValue(Border.BackgroundProperty, box.Background);
+        border.SetValue(Border.BorderBrushProperty, box.BorderBrush);
+        border.SetValue(Border.BorderThicknessProperty, box.BorderThickness);
+        var host = new FrameworkElementFactory(typeof(ScrollViewer));
+        host.Name = "PART_ContentHost";
+        host.SetValue(ScrollViewer.BackgroundProperty, Brushes.Transparent);
+        host.SetValue(FrameworkElement.VerticalAlignmentProperty, VerticalAlignment.Center);
+        host.SetValue(FrameworkElement.HorizontalAlignmentProperty, HorizontalAlignment.Stretch);
         border.AppendChild(host);
         var template = new ControlTemplate(typeof(TextBox));
         template.VisualTree = border;
@@ -938,7 +1150,7 @@ internal sealed class MainWindow : Window
     {
         ClearFullImageCache();
         ClearGallery();
-        SetStatus("目录已变更，请扫描或分类。", false);
+        SetStatus("目录已变更，请扫描或创建分类。", false);
     }
 
     private void OpenFolderHistory(object sender, RoutedEventArgs e)
@@ -963,18 +1175,6 @@ internal sealed class MainWindow : Window
         menu.IsOpen = true;
     }
 
-    private void ToggleTheme(object sender, RoutedEventArgs e)
-    {
-        var currentFolder = folderBox.Text;
-        darkMode = !darkMode;
-        SaveSettings();
-        Background = Brush("#F4F7FB");
-        ResetUiControls(currentFolder);
-        Content = BuildUi();
-        if (Directory.Exists(currentFolder.Trim())) RefreshCurrentFolder();
-        else SetStatus("选择一个相机照片目录，然后先扫描或分类。", false);
-    }
-
     private void ResetUiControls(string currentFolder)
     {
         folderBox = new TextBox { Text = currentFolder };
@@ -986,6 +1186,14 @@ internal sealed class MainWindow : Window
         jpgCount = new TextBlock();
         rawCount = new TextBlock();
         pendingCount = new TextBlock();
+        cullProgressCount = new TextBlock();
+        cullProgressPercent = new TextBlock();
+        pickedProgressCount = new TextBlock();
+        rejectedProgressCount = new TextBlock();
+        unprocessedProgressCount = new TextBlock();
+        ratedProgressCount = new TextBlock();
+        cullProgressFillColumn = new ColumnDefinition();
+        cullProgressRemainingColumn = new ColumnDefinition();
         galleryCaption = new TextBlock();
         photoInfoTitle = new TextBlock();
         photoInfo = new TextBlock();
@@ -999,6 +1207,7 @@ internal sealed class MainWindow : Window
         navigatorDragging = false;
         navigatorUpdateQueued = false;
         organizeButton = new Button();
+        unorganizeButton = new Button();
         recycleSelectedButton = new Button();
         recycleRejectedButton = new Button();
         filterButton = new Button();
@@ -1035,9 +1244,7 @@ internal sealed class MainWindow : Window
             if (!File.Exists(settingsPath)) return;
             foreach (var line in File.ReadAllLines(settingsPath))
             {
-                if (line.StartsWith("theme=", StringComparison.OrdinalIgnoreCase))
-                    darkMode = String.Equals(line.Substring(6), "dark", StringComparison.OrdinalIgnoreCase);
-                else if (line.StartsWith("last_folder=", StringComparison.OrdinalIgnoreCase))
+                if (line.StartsWith("last_folder=", StringComparison.OrdinalIgnoreCase))
                     lastFolder = line.Substring(12);
                 else if (line.StartsWith("view=", StringComparison.OrdinalIgnoreCase))
                     singleViewMode = String.Equals(line.Substring(5), "single", StringComparison.OrdinalIgnoreCase);
@@ -1061,6 +1268,8 @@ internal sealed class MainWindow : Window
                     gallerySortMode = NormalizeSortMode(line.Substring(5));
                 else if (line.StartsWith("filter=", StringComparison.OrdinalIgnoreCase))
                     activeFilter = NormalizeFilter(line.Substring(7));
+                else if (line.StartsWith("auto_advance=", StringComparison.OrdinalIgnoreCase))
+                    autoAdvanceEnabled = String.Equals(line.Substring(13), "true", StringComparison.OrdinalIgnoreCase);
                 else if (line.StartsWith("folder=", StringComparison.OrdinalIgnoreCase))
                 {
                     var folder = line.Substring(7);
@@ -1079,7 +1288,7 @@ internal sealed class MainWindow : Window
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(settingsPath));
-            var lines = new List<string> { "theme=" + (darkMode ? "dark" : "light") };
+            var lines = new List<string>();
             var currentFolder = folderBox == null ? lastFolder : (folderBox.Text ?? String.Empty).Trim();
             lines.Add("last_folder=" + (currentFolder ?? String.Empty));
             lines.Add("view=" + (singleViewMode ? "single" : "grid"));
@@ -1089,6 +1298,7 @@ internal sealed class MainWindow : Window
             lines.Add("grid_tile_width=" + gridTileWidth.ToString("0", CultureInfo.InvariantCulture));
             lines.Add("sort=" + gallerySortMode);
             lines.Add("filter=" + activeFilter);
+            lines.Add("auto_advance=" + (autoAdvanceEnabled ? "true" : "false"));
             lines.AddRange(recentFolders.Take(3).Select(folder => "folder=" + folder));
             File.WriteAllLines(settingsPath, lines);
         }
@@ -1100,9 +1310,14 @@ internal sealed class MainWindow : Window
         switch ((value ?? String.Empty).ToLowerInvariant())
         {
             case "name_desc":
-            case "modified_asc":
-            case "modified_desc":
+            case "capture_asc":
+            case "capture_desc":
                 return value.ToLowerInvariant();
+            // Migrate the two former modification-time settings to EXIF capture-time sorting.
+            case "modified_asc":
+                return "capture_asc";
+            case "modified_desc":
+                return "capture_desc";
             default:
                 return "name_asc";
         }
@@ -1128,7 +1343,7 @@ internal sealed class MainWindow : Window
         if (!Directory.Exists(folder))
         {
             singleViewMode = false;
-            SetStatus("选择一个相机照片目录，然后先扫描或分类。", false);
+            SetStatus("选择一个相机照片目录，然后扫描或创建分类。", false);
             return;
         }
 
@@ -1206,13 +1421,44 @@ internal sealed class MainWindow : Window
         {
             case "name_desc":
                 return source.OrderByDescending(Path.GetFileName, StringComparer.OrdinalIgnoreCase).ToList();
-            case "modified_asc":
-                return source.OrderBy(File.GetLastWriteTimeUtc).ThenBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase).ToList();
-            case "modified_desc":
-                return source.OrderByDescending(File.GetLastWriteTimeUtc).ThenBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase).ToList();
+            case "capture_asc":
+                return source.OrderBy(CaptureSortBucket).ThenBy(CaptureSortValue).ThenBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase).ToList();
+            case "capture_desc":
+                return source.OrderBy(CaptureSortBucket).ThenByDescending(CaptureSortValue).ThenBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase).ToList();
             default:
                 return source.OrderBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase).ToList();
         }
+    }
+
+    private int CaptureSortBucket(string file)
+    {
+        return ReadCaptureDate(file).HasValue ? 0 : 1;
+    }
+
+    private DateTime CaptureSortValue(string file)
+    {
+        return ReadCaptureDate(file) ?? DateTime.MinValue;
+    }
+
+    private DateTime? ReadCaptureDate(string file)
+    {
+        DateTime? cached;
+        if (captureDateCache.TryGetValue(file, out cached)) return cached;
+        DateTime? result = null;
+        try
+        {
+            using (var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+            {
+                var decoder = BitmapDecoder.Create(stream, BitmapCreateOptions.PreservePixelFormat, BitmapCacheOption.OnDemand);
+                var metadata = decoder.Frames.Count > 0 ? decoder.Frames[0].Metadata as BitmapMetadata : null;
+                result = ParseExifDate(ReadMetadataValue(metadata, "/app1/ifd/exif/{ushort=36867}"));
+                if (!result.HasValue) result = ParseExifDate(ReadMetadataValue(metadata, "/app1/ifd/exif/{ushort=36868}"));
+                if (!result.HasValue) result = ParseExifDate(ReadMetadataValue(metadata, "/app1/ifd/{ushort=306}"));
+            }
+        }
+        catch { }
+        captureDateCache[file] = result;
+        return result;
     }
 
     private void ScanDirectory()
@@ -1230,6 +1476,11 @@ internal sealed class MainWindow : Window
         jpgCount.Text = jpgTotal.ToString("N0") + " 张";
         rawCount.Text = rawTotal.ToString("N0") + " 张";
         pendingCount.Text = (pendingJpg + pendingRaw).ToString("N0") + " 个";
+        UpdateCullProgress();
+        organizeButton.IsHitTestVisible = pendingJpg + pendingRaw > 0;
+        organizeButton.Opacity = pendingJpg + pendingRaw > 0 ? 1.0 : 0.52;
+        unorganizeButton.IsHitTestVisible = jpgTotal + rawTotal > 0;
+        unorganizeButton.Opacity = jpgTotal + rawTotal > 0 ? 1.0 : 0.52;
         folderHint.Text = pendingJpg + pendingRaw > 0 ? "目录顶层有待分类的照片" : "目录顶层没有待分类照片";
         var missing = FindMissingPairs(root);
         var pairSummary = missing.Item1.Count == 0 && missing.Item2.Count == 0
@@ -1262,14 +1513,103 @@ internal sealed class MainWindow : Window
         {
             var destination = Path.Combine(root, IsJpg(file) ? "jpg" : "arw", Path.GetFileName(file));
             if (File.Exists(destination)) { skipped++; continue; }
-            try { File.Move(file, destination); moved++; }
+            try
+            {
+                File.Move(file, destination);
+                RemapPhotoState(file, destination);
+                moved++;
+            }
             catch { skipped++; }
         }
+        SaveCullMarks();
         ScanDirectory();
         RefreshGallery();
         var result = "已分类 " + moved + " 个文件。" + (skipped > 0 ? " " + skipped + " 个未移动（同名文件或访问错误）。" : "");
         SetStatus(result, false);
         MessageBox.Show(result, "分类完成", MessageBoxButton.OK, MessageBoxImage.Information);
+    }
+
+    private void UnorganizeFiles(object sender, RoutedEventArgs e)
+    {
+        var root = RootFolder(true);
+        if (root == null) return;
+        var jpgFolder = Path.Combine(root, "jpg");
+        var rawFolder = Path.Combine(root, "arw");
+        var jpgs = FilesIn(jpgFolder).Where(IsJpg).ToList();
+        var raws = FilesIn(rawFolder).Where(IsRaw).ToList();
+        if (jpgs.Count == 0 && raws.Count == 0)
+        {
+            MessageBox.Show("jpg 与 arw 文件夹中没有可还原的照片。", "没有可取消的分类", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        var conflicts = jpgs.Concat(raws).Where(file => File.Exists(Path.Combine(root, Path.GetFileName(file)))).ToList();
+        if (conflicts.Count > 0)
+        {
+            var preview = String.Join("\n", conflicts.Take(8).Select(Path.GetFileName));
+            if (conflicts.Count > 8) preview += "\n……以及另外 " + (conflicts.Count - 8) + " 个文件";
+            MessageBox.Show("根目录已存在以下同名文件，取消分类已停止，未移动任何照片：\n\n" + preview,
+                "存在同名文件", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        var message = "将把 " + jpgs.Count + " 个 JPG/JPEG 和 " + raws.Count + " 个 ARW 还原到：\n\n"
+                    + root + "\n\n此操作不会覆盖同名文件。继续吗？";
+        if (MessageBox.Show(message, "确认取消分类", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
+
+        int moved = 0;
+        var failures = new List<string>();
+        foreach (var file in jpgs.Concat(raws))
+        {
+            var destination = Path.Combine(root, Path.GetFileName(file));
+            try
+            {
+                if (File.Exists(destination)) failures.Add(Path.GetFileName(file) + "（根目录已有同名文件）");
+                else
+                {
+                    File.Move(file, destination);
+                    RemapPhotoState(file, destination);
+                    moved++;
+                }
+            }
+            catch (Exception ex) { failures.Add(Path.GetFileName(file) + "（" + ex.Message + "）"); }
+        }
+
+        SaveCullMarks();
+
+        TryDeleteEmptyPhotoFolder(jpgFolder);
+        TryDeleteEmptyPhotoFolder(rawFolder);
+
+        ScanDirectory();
+        RefreshGallery();
+        var result = "已还原 " + moved + " 个文件。";
+        if (failures.Count > 0) result += " " + failures.Count + " 个未移动：\n" + String.Join("\n", failures.Take(8));
+        SetStatus(result, failures.Count > 0);
+        MessageBox.Show(result, failures.Count > 0 ? "取消分类部分完成" : "取消分类完成", MessageBoxButton.OK,
+            failures.Count > 0 ? MessageBoxImage.Warning : MessageBoxImage.Information);
+    }
+
+    private static void TryDeleteEmptyPhotoFolder(string folder)
+    {
+        try
+        {
+            if (Directory.Exists(folder) && !Directory.EnumerateFileSystemEntries(folder).Any()) Directory.Delete(folder, false);
+        }
+        catch { }
+    }
+
+    private void RemapPhotoState(string source, string destination)
+    {
+        if (pickedFiles.Remove(source)) pickedFiles.Add(destination);
+        if (rejectedFiles.Remove(source)) rejectedFiles.Add(destination);
+        int rating;
+        if (starRatings.TryGetValue(source, out rating))
+        {
+            starRatings.Remove(source);
+            starRatings[destination] = rating;
+        }
+        if (selectedFiles.Remove(source)) selectedFiles.Add(destination);
+        if (String.Equals(currentSingleFile, source, StringComparison.OrdinalIgnoreCase)) currentSingleFile = destination;
     }
 
     private void RefreshGallery()
@@ -1283,7 +1623,7 @@ internal sealed class MainWindow : Window
         var visibleJpgs = jpgs.Where(MatchesFilter).ToList();
         if (visibleJpgs.Count == 0)
         {
-            gallery.Children.Add(new TextBlock { Text = jpgs.Count == 0 ? "这里还没有 JPG。点击“分类”即可。" : "当前筛选没有匹配的照片。", Margin = new Thickness(20), FontSize = 15, Foreground = Brush("#6A7787") });
+            gallery.Children.Add(new TextBlock { Text = jpgs.Count == 0 ? "这里还没有 JPG。点击“创建分类”即可。" : "当前筛选没有匹配的照片。", Margin = new Thickness(20), FontSize = 15, Foreground = Brush("#6A7787") });
             galleryCaption.Text = jpgs.Count == 0 ? "没有可浏览的 JPG" : "筛选：" + FilterLabel() + " · 0 张";
             return;
         }
@@ -1329,6 +1669,7 @@ internal sealed class MainWindow : Window
         recycleRejectedButton.Opacity = rejectedFiles.Count > 0 ? 1.0 : 0.52;
         photoInfoTitle.Text = "照片信息";
         photoInfo.Text = "点击缩略图查看拍摄信息";
+        UpdateCullProgress();
     }
 
     private Border CreateTile(string file)
@@ -1532,6 +1873,12 @@ internal sealed class MainWindow : Window
 
     private void MainWindowPreviewKeyDown(object sender, KeyEventArgs e)
     {
+        if (e.Key == Key.CapsLock)
+        {
+            if (!e.IsRepeat) ToggleAutoAdvance();
+            e.Handled = true;
+            return;
+        }
         if (Keyboard.FocusedElement is TextBox || Keyboard.FocusedElement is PasswordBox || Keyboard.FocusedElement is ComboBox) return;
         if (e.Key == Key.Left)
         {
@@ -1555,20 +1902,24 @@ internal sealed class MainWindow : Window
         if (String.IsNullOrWhiteSpace(active)) return;
         if (e.Key == Key.P)
         {
-            TogglePick(active);
+            var next = NextPhotoForAutoAdvance(active);
+            TogglePick(active, next, autoAdvanceEnabled);
             e.Handled = true;
             return;
         }
         if (e.Key == Key.X || e.Key == Key.Delete)
         {
-            ToggleReject(active);
+            var next = NextPhotoForAutoAdvance(active);
+            ToggleReject(active, next, autoAdvanceEnabled);
             e.Handled = true;
             return;
         }
         var stars = StarKeyValue(e.Key);
         if (stars >= 0)
         {
-            SetStarRating(active, stars);
+            var shouldAdvance = autoAdvanceEnabled && stars > 0;
+            var next = shouldAdvance ? NextPhotoForAutoAdvance(active) : null;
+            SetStarRating(active, stars, next, shouldAdvance);
             e.Handled = true;
         }
     }
@@ -1583,9 +1934,19 @@ internal sealed class MainWindow : Window
     private string ActivePhotoFile()
     {
         if (singleViewMode && !String.IsNullOrWhiteSpace(currentSingleFile)) return currentSingleFile;
+        if (!String.IsNullOrWhiteSpace(currentSingleFile) && selectedFiles.Contains(currentSingleFile)) return currentSingleFile;
         var selected = selectedFiles.FirstOrDefault();
         if (!String.IsNullOrWhiteSpace(selected)) return selected;
         return galleryFiles.FirstOrDefault();
+    }
+
+    private string NextPhotoForAutoAdvance(string active)
+    {
+        if (!autoAdvanceEnabled || String.IsNullOrWhiteSpace(active)) return null;
+        EnsureGalleryFiles();
+        var sequence = singleViewMode ? galleryFiles.ToList() : galleryFiles.Where(MatchesFilter).ToList();
+        var index = sequence.FindIndex(item => String.Equals(item, active, StringComparison.OrdinalIgnoreCase));
+        return index >= 0 && index + 1 < sequence.Count ? sequence[index + 1] : null;
     }
 
     private void SelectRelativeInGrid(int direction)
@@ -1606,39 +1967,42 @@ internal sealed class MainWindow : Window
         recycleSelectedButton.Opacity = 1.0;
     }
 
-    private void TogglePick(string file)
+    private void TogglePick(string file, string nextFile = null, bool advanceRequested = false)
     {
         if (pickedFiles.Contains(file)) pickedFiles.Remove(file);
         else { pickedFiles.Add(file); rejectedFiles.Remove(file); }
         SaveCullMarks();
-        ApplyCullChange(file, "保留旗标已更新。");
+        ApplyCullChange(file, "保留旗标已更新。", nextFile, advanceRequested);
     }
 
-    private void ToggleReject(string file)
+    private void ToggleReject(string file, string nextFile = null, bool advanceRequested = false)
     {
         if (rejectedFiles.Contains(file)) rejectedFiles.Remove(file);
         else { rejectedFiles.Add(file); pickedFiles.Remove(file); }
         SaveCullMarks();
-        ApplyCullChange(file, "废片旗标已更新。可点击“移除所有废片”统一清理。 ");
+        ApplyCullChange(file, "废片旗标已更新。可点击“移除所有废片”统一清理。", nextFile, advanceRequested);
     }
 
-    private void SetStarRating(string file, int rating)
+    private void SetStarRating(string file, int rating, string nextFile = null, bool advanceRequested = false)
     {
         if (rating <= 0) starRatings.Remove(file);
         else starRatings[file] = rating;
         SaveCullMarks();
-        ApplyCullChange(file, rating <= 0 ? "已清除星级。" : "已评为 " + rating + " 星。");
+        ApplyCullChange(file, rating <= 0 ? "已清除星级。" : "已评为 " + rating + " 星。", nextFile, advanceRequested);
     }
 
-    private void ApplyCullChange(string file, string message)
+    private void ApplyCullChange(string file, string message, string nextFile, bool advanceRequested)
     {
+        var advanced = advanceRequested && !String.IsNullOrWhiteSpace(nextFile) && File.Exists(nextFile);
+        currentSingleFile = advanced ? nextFile : file;
         if (singleViewMode)
         {
-            currentSingleFile = file;
             RebuildUi();
-            ShowPhotoInfo(file);
+            ShowPhotoInfo(currentSingleFile);
         }
         else RebuildUi();
+        if (advanceRequested)
+            message += advanced ? " 已自动前进到下一张。" : " 已到当前序列最后一张。";
         SetStatus(message, false);
     }
 
@@ -1695,7 +2059,7 @@ internal sealed class MainWindow : Window
                 RestoreGridCurrentPhoto();
             }
         }
-        else SetStatus("选择一个相机照片目录，然后先扫描或分类。", false);
+        else SetStatus("选择一个相机照片目录，然后扫描或创建分类。", false);
     }
 
     private void NavigateSingle(int direction)
@@ -1821,6 +2185,7 @@ internal sealed class MainWindow : Window
             fullImageLoadTasks.Clear();
             fullImageCacheLru.Clear();
         }
+        captureDateCache.Clear();
     }
 
     private void SingleViewerMouseWheel(object sender, MouseWheelEventArgs e)
@@ -2173,6 +2538,7 @@ internal sealed class MainWindow : Window
         catch { }
 
         var date = FormatExifDate(ReadMetadataValue(metadata, "/app1/ifd/exif/{ushort=36867}"));
+        if (date == "—") date = FormatExifDate(ReadMetadataValue(metadata, "/app1/ifd/exif/{ushort=36868}"));
         if (date == "—") date = FormatExifDate(ReadMetadataValue(metadata, "/app1/ifd/{ushort=306}"));
         var model = ToDisplayText(ReadMetadataValue(metadata, "/app1/ifd/{ushort=272}"));
         var iso = ToDisplayText(ReadMetadataValue(metadata, "/app1/ifd/exif/{ushort=34855}"));
@@ -2205,10 +2571,19 @@ internal sealed class MainWindow : Window
     {
         var text = ToDisplayText(value);
         if (text == "—") return text;
+        var date = ParseExifDate(value);
+        if (date.HasValue) return date.Value.ToString("yyyy/M/d HH:mm", CultureInfo.InvariantCulture);
+        return text;
+    }
+
+    private static DateTime? ParseExifDate(object value)
+    {
+        var text = ToDisplayText(value);
+        if (text == "—") return null;
         DateTime date;
         if (DateTime.TryParseExact(text, new[] { "yyyy:MM:dd HH:mm:ss", "yyyy-MM-dd HH:mm:ss" }, CultureInfo.InvariantCulture, DateTimeStyles.None, out date))
-            return date.ToString("yyyy/M/d HH:mm", CultureInfo.InvariantCulture);
-        return text;
+            return date;
+        return null;
     }
 
     private static bool TryGetRational(object value, out double number, out uint numerator, out uint denominator)
@@ -2312,7 +2687,7 @@ internal sealed class MainWindow : Window
         button.Cursor = Cursors.Hand;
         button.BorderThickness = new Thickness(0);
         // Keep every action in one visual family; availability is communicated by opacity.
-        button.Background = Brush("#2678D4");
+        button.Background = Brush(ButtonBlue);
         button.Foreground = Brushes.White;
         ApplyRoundedButtonTemplate(button, 5);
     }
@@ -2329,29 +2704,6 @@ internal sealed class MainWindow : Window
         border.SetValue(Border.BackgroundProperty, button.Background);
         border.SetValue(Border.BorderBrushProperty, button.BorderBrush);
         border.SetValue(Border.BorderThicknessProperty, button.BorderThickness);
-        var presenter = new FrameworkElementFactory(typeof(ContentPresenter));
-        presenter.SetValue(ContentPresenter.HorizontalAlignmentProperty, HorizontalAlignment.Center);
-        presenter.SetValue(ContentPresenter.VerticalAlignmentProperty, VerticalAlignment.Center);
-        border.AppendChild(presenter);
-        var template = new ControlTemplate(typeof(Button));
-        template.VisualTree = border;
-        button.Template = template;
-    }
-
-    private static void StyleThemeButton(Button button)
-    {
-        button.Width = 52;
-        button.Height = 52;
-        button.Padding = new Thickness(0);
-        button.Cursor = Cursors.Hand;
-        button.BorderThickness = new Thickness(0);
-        button.Background = Brush("#EAF1F8");
-        button.Foreground = Brush("#245F98");
-        var border = new FrameworkElementFactory(typeof(Border));
-        border.SetValue(Border.CornerRadiusProperty, new CornerRadius(26));
-        border.SetValue(Border.BackgroundProperty, Brush("#EAF1F8"));
-        border.SetValue(Border.BorderBrushProperty, Brush("#D9E2EC"));
-        border.SetValue(Border.BorderThicknessProperty, new Thickness(1));
         var presenter = new FrameworkElementFactory(typeof(ContentPresenter));
         presenter.SetValue(ContentPresenter.HorizontalAlignmentProperty, HorizontalAlignment.Center);
         presenter.SetValue(ContentPresenter.VerticalAlignmentProperty, VerticalAlignment.Center);
@@ -2384,10 +2736,22 @@ internal sealed class MainWindow : Window
         button.Padding = new Thickness(0);
         button.FontSize = 11;
         button.Cursor = Cursors.Hand;
-        button.BorderBrush = darkMode ? Brush("#596675") : Brush("#B7C3D0");
+        button.BorderBrush = Brush(ButtonBlue);
         button.BorderThickness = new Thickness(1, 1, 1, 1);
-        button.Background = darkMode ? Brush("#303A46") : Brush("#EAF1F8");
-        button.Foreground = darkMode ? Brush("#DCEBFA") : Brush("#245F98");
+        button.Background = Brush(ButtonBlue);
+        button.Foreground = Brushes.White;
+        var border = new FrameworkElementFactory(typeof(Border));
+        border.SetValue(Border.CornerRadiusProperty, new CornerRadius(0, 6, 6, 0));
+        border.SetValue(Border.BackgroundProperty, button.Background);
+        border.SetValue(Border.BorderBrushProperty, button.BorderBrush);
+        border.SetValue(Border.BorderThicknessProperty, button.BorderThickness);
+        var presenter = new FrameworkElementFactory(typeof(ContentPresenter));
+        presenter.SetValue(ContentPresenter.HorizontalAlignmentProperty, HorizontalAlignment.Center);
+        presenter.SetValue(ContentPresenter.VerticalAlignmentProperty, VerticalAlignment.Center);
+        border.AppendChild(presenter);
+        var template = new ControlTemplate(typeof(Button));
+        template.VisualTree = border;
+        button.Template = template;
     }
 
     private static ScrollBar CreateMiniVerticalScrollBar()
@@ -2444,45 +2808,6 @@ internal sealed class MainWindow : Window
         var template = new ControlTemplate(typeof(MenuItem));
         template.VisualTree = border;
         item.Template = template;
-    }
-
-    private static UIElement CreateThemeIcon()
-    {
-        return darkMode ? CreateSunIcon() : CreateMoonIcon();
-    }
-
-    private static UIElement CreateMoonIcon()
-    {
-        var canvas = new Canvas { Width = 28, Height = 28 };
-        var outer = new System.Windows.Shapes.Ellipse { Width = 18, Height = 18, Fill = Brush("#2678D4") };
-        Canvas.SetLeft(outer, 4);
-        Canvas.SetTop(outer, 5);
-        canvas.Children.Add(outer);
-        var cutout = new System.Windows.Shapes.Ellipse { Width = 18, Height = 18, Fill = Brush("#EAF1F8") };
-        Canvas.SetLeft(cutout, 10);
-        Canvas.SetTop(cutout, 2);
-        canvas.Children.Add(cutout);
-        return canvas;
-    }
-
-    private static UIElement CreateSunIcon()
-    {
-        var canvas = new Canvas { Width = 28, Height = 28 };
-        var color = Brush("#2678D4");
-        for (var index = 0; index < 8; index++)
-        {
-            var angle = (Math.PI * 2 * index) / 8;
-            var x1 = 14 + Math.Cos(angle) * 9;
-            var y1 = 14 + Math.Sin(angle) * 9;
-            var x2 = 14 + Math.Cos(angle) * 12;
-            var y2 = 14 + Math.Sin(angle) * 12;
-            canvas.Children.Add(new System.Windows.Shapes.Line { X1 = x1, Y1 = y1, X2 = x2, Y2 = y2, Stroke = color, StrokeThickness = 2, StrokeStartLineCap = PenLineCap.Round, StrokeEndLineCap = PenLineCap.Round });
-        }
-        var core = new System.Windows.Shapes.Ellipse { Width = 11, Height = 11, Fill = color };
-        Canvas.SetLeft(core, 8.5);
-        Canvas.SetTop(core, 8.5);
-        canvas.Children.Add(core);
-        return canvas;
     }
 
     private static SolidColorBrush Brush(string hex)
