@@ -223,13 +223,6 @@ internal sealed class MainWindow : Window
     private UIElement BuildSidebar()
     {
         var panel = new StackPanel();
-        var brand = new Grid { Margin = new Thickness(2, 1, 2, 14) };
-        brand.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        var text = new StackPanel();
-        text.Children.Add(new TextBlock { Text = "RAWMate", FontSize = 24, FontWeight = FontWeights.SemiBold, Foreground = Brush("#1F2937") });
-        text.Children.Add(new TextBlock { Text = "JPG / ARW 照片挑片", Margin = new Thickness(0, 3, 0, 0), FontSize = 12, Foreground = Brush("#6A7787") });
-        brand.Children.Add(text);
-        panel.Children.Add(brand);
         panel.Children.Add(BuildPathCard());
         panel.Children.Add(Divider());
         panel.Children.Add(BuildStatCard());
@@ -242,16 +235,18 @@ internal sealed class MainWindow : Window
     {
         var panel = new StackPanel();
         panel.Children.Add(SectionTitle("照片目录"));
-        var folderRow = new Grid { Margin = new Thickness(0, 12, 0, 0) };
+        var folderRow = new Grid();
         folderRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         folderRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(42) });
         folderBox.Height = 40;
         folderBox.FontSize = 15;
-        folderBox.Padding = new Thickness(10, 6, 10, 6);
-        folderBox.BorderBrush = darkMode ? Brush("#596675") : Brush("#B7C3D0");
+        folderBox.Padding = new Thickness(10, 0, 10, 0);
+        folderBox.VerticalContentAlignment = VerticalAlignment.Center;
+        folderBox.BorderThickness = new Thickness(0);
         folderBox.Background = darkMode ? Brush("#171D24") : Brush("#FFFFFF");
         folderBox.Foreground = darkMode ? Brush("#F0F4F8") : Brush("#1F2937");
         folderBox.CaretBrush = folderBox.Foreground;
+        StyleRoundedTextBox(folderBox, new CornerRadius(6, 0, 0, 6));
         folderBox.TextChanged -= FolderBoxTextChanged;
         folderBox.TextChanged += FolderBoxTextChanged;
         folderRow.Children.Add(folderBox);
@@ -261,7 +256,15 @@ internal sealed class MainWindow : Window
         folderHistoryButton.Click += OpenFolderHistory;
         Grid.SetColumn(folderHistoryButton, 1);
         folderRow.Children.Add(folderHistoryButton);
-        panel.Children.Add(folderRow);
+        panel.Children.Add(new Border
+        {
+            Child = folderRow,
+            Margin = new Thickness(0, 10, 0, 0),
+            BorderBrush = darkMode ? Brush("#596675") : Brush("#B7C3D0"),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(6),
+            ClipToBounds = true
+        });
         folderHint.Margin = new Thickness(2, 6, 2, 0);
         folderHint.FontSize = 12;
         folderHint.Foreground = Brush("#6A7787");
@@ -352,36 +355,35 @@ internal sealed class MainWindow : Window
 
         var progress = new Grid
         {
-            Height = 18,
-            Margin = new Thickness(0, 8, 0, 0),
-            Background = Brush("#171D24"),
-            ClipToBounds = true
+            Background = Brushes.Transparent
         };
         cullProgressFillColumn = new ColumnDefinition();
         cullProgressRemainingColumn = new ColumnDefinition();
         progress.ColumnDefinitions.Add(cullProgressFillColumn);
         progress.ColumnDefinitions.Add(cullProgressRemainingColumn);
-        var fill = new Border { Background = Brush(ButtonBlue), CornerRadius = new CornerRadius(4, 0, 0, 4) };
+        var fill = new Border { Background = Brush(ButtonBlue), CornerRadius = new CornerRadius(5) };
         progress.Children.Add(fill);
-        cullProgressPercent.FontSize = 11;
+        cullProgressPercent.FontSize = 12;
         cullProgressPercent.FontWeight = FontWeights.SemiBold;
         cullProgressPercent.Foreground = Brushes.White;
-        cullProgressPercent.HorizontalAlignment = HorizontalAlignment.Center;
+        cullProgressPercent.HorizontalAlignment = HorizontalAlignment.Stretch;
         cullProgressPercent.VerticalAlignment = VerticalAlignment.Center;
+        cullProgressPercent.TextAlignment = TextAlignment.Center;
         Grid.SetColumnSpan(cullProgressPercent, 2);
         Panel.SetZIndex(cullProgressPercent, 1);
         progress.Children.Add(cullProgressPercent);
-        var track = new Border
+        panel.Children.Add(new Border
         {
+            Child = progress,
+            Height = 22,
+            Margin = new Thickness(0, 8, 0, 0),
+            Padding = new Thickness(1),
+            Background = Brush("#171D24"),
             BorderBrush = Brush("#596675"),
             BorderThickness = new Thickness(1),
-            CornerRadius = new CornerRadius(4),
-            IsHitTestVisible = false
-        };
-        Grid.SetColumnSpan(track, 2);
-        Panel.SetZIndex(track, 2);
-        progress.Children.Add(track);
-        panel.Children.Add(progress);
+            CornerRadius = new CornerRadius(5),
+            ClipToBounds = true
+        });
 
         var counts = new Grid { Margin = new Thickness(0, 9, 0, 0) };
         for (var index = 0; index < 4; index++)
@@ -1063,6 +1065,24 @@ internal sealed class MainWindow : Window
         host.Name = "PART_ContentHost";
         host.SetValue(ScrollViewer.BackgroundProperty, Brushes.Transparent);
         host.SetValue(ScrollViewer.VerticalContentAlignmentProperty, VerticalAlignment.Center);
+        border.AppendChild(host);
+        var template = new ControlTemplate(typeof(TextBox));
+        template.VisualTree = border;
+        box.Template = template;
+    }
+
+    private static void StyleRoundedTextBox(TextBox box, CornerRadius radius)
+    {
+        var border = new FrameworkElementFactory(typeof(Border));
+        border.SetValue(Border.CornerRadiusProperty, radius);
+        border.SetValue(Border.BackgroundProperty, box.Background);
+        border.SetValue(Border.BorderBrushProperty, box.BorderBrush);
+        border.SetValue(Border.BorderThicknessProperty, box.BorderThickness);
+        var host = new FrameworkElementFactory(typeof(ScrollViewer));
+        host.Name = "PART_ContentHost";
+        host.SetValue(ScrollViewer.BackgroundProperty, Brushes.Transparent);
+        host.SetValue(FrameworkElement.VerticalAlignmentProperty, VerticalAlignment.Center);
+        host.SetValue(FrameworkElement.HorizontalAlignmentProperty, HorizontalAlignment.Stretch);
         border.AppendChild(host);
         var template = new ControlTemplate(typeof(TextBox));
         template.VisualTree = border;
@@ -2720,7 +2740,18 @@ internal sealed class MainWindow : Window
         button.BorderThickness = new Thickness(1, 1, 1, 1);
         button.Background = Brush(ButtonBlue);
         button.Foreground = Brushes.White;
-        ApplyRoundedButtonTemplate(button, 0);
+        var border = new FrameworkElementFactory(typeof(Border));
+        border.SetValue(Border.CornerRadiusProperty, new CornerRadius(0, 6, 6, 0));
+        border.SetValue(Border.BackgroundProperty, button.Background);
+        border.SetValue(Border.BorderBrushProperty, button.BorderBrush);
+        border.SetValue(Border.BorderThicknessProperty, button.BorderThickness);
+        var presenter = new FrameworkElementFactory(typeof(ContentPresenter));
+        presenter.SetValue(ContentPresenter.HorizontalAlignmentProperty, HorizontalAlignment.Center);
+        presenter.SetValue(ContentPresenter.VerticalAlignmentProperty, VerticalAlignment.Center);
+        border.AppendChild(presenter);
+        var template = new ControlTemplate(typeof(Button));
+        template.VisualTree = border;
+        button.Template = template;
     }
 
     private static ScrollBar CreateMiniVerticalScrollBar()
