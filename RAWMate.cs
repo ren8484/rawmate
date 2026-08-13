@@ -190,16 +190,38 @@ internal sealed class MainWindow : Window
         root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
 
         var sidebar = new Border { Background = Brush("#FFFFFF"), BorderBrush = Brush("#D9E2EC"), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(9), Margin = new Thickness(6, 6, 3, 6), Padding = new Thickness(14), ClipToBounds = true };
+        var sidebarLayout = new Grid();
+        sidebarLayout.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        sidebarLayout.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+
         var sidebarContent = new Grid { Width = SidebarContentWidth, HorizontalAlignment = HorizontalAlignment.Left };
         sidebarContent.Children.Add(BuildSidebar());
-        sidebar.Child = new Viewbox
+        var sidebarViewbox = new Viewbox
         {
             Child = sidebarContent,
             Stretch = Stretch.Uniform,
             StretchDirection = StretchDirection.DownOnly,
             HorizontalAlignment = HorizontalAlignment.Stretch,
-            VerticalAlignment = VerticalAlignment.Stretch
+            // Keep the removed brand area's space from reappearing on tall/4K windows.
+            // The Viewbox may still scale the sidebar down on short/high-DPI work areas,
+            // but any unused vertical space must remain below the controls.
+            VerticalAlignment = VerticalAlignment.Top
         };
+        sidebarLayout.Children.Add(sidebarViewbox);
+
+        var versionText = new TextBlock
+        {
+            Text = GetDisplayVersion(),
+            Foreground = Brush("#8F9CAA"),
+            FontSize = 11,
+            FontWeight = FontWeights.SemiBold,
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = VerticalAlignment.Bottom,
+            Margin = new Thickness(2, 8, 0, 0)
+        };
+        Grid.SetRow(versionText, 1);
+        sidebarLayout.Children.Add(versionText);
+        sidebar.Child = sidebarLayout;
         root.Children.Add(sidebar);
 
         var main = new Grid { Margin = new Thickness(3, 6, 6, 6) };
@@ -218,6 +240,22 @@ internal sealed class MainWindow : Window
         Grid.SetColumn(main, 1);
         root.Children.Add(main);
         return root;
+    }
+
+    private static string GetDisplayVersion()
+    {
+        var assembly = Assembly.GetExecutingAssembly();
+        var attribute = assembly.GetCustomAttributes(typeof(AssemblyInformationalVersionAttribute), false)
+            .OfType<AssemblyInformationalVersionAttribute>()
+            .FirstOrDefault();
+        var raw = attribute == null ? null : attribute.InformationalVersion;
+        if (String.IsNullOrWhiteSpace(raw)) raw = assembly.GetName().Version.ToString(3);
+
+        var metadataIndex = raw.IndexOf('+');
+        if (metadataIndex >= 0) raw = raw.Substring(0, metadataIndex);
+        var parts = raw.Split('.');
+        if (parts.Length >= 3) return "V" + parts[0] + "." + parts[1] + parts[2];
+        return "V" + raw;
     }
 
     private UIElement BuildSidebar()
