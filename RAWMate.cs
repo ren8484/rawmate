@@ -25,9 +25,9 @@ using Forms = System.Windows.Forms;
 [assembly: AssemblyCompany("ren8484")]
 [assembly: AssemblyProduct("RAWMate")]
 [assembly: AssemblyCopyright("Copyright © 2026 ren8484")]
-[assembly: AssemblyVersion("1.1.0.0")]
-[assembly: AssemblyFileVersion("1.1.0.0")]
-[assembly: AssemblyInformationalVersion("1.1.0")]
+[assembly: AssemblyVersion("1.1.1.0")]
+[assembly: AssemblyFileVersion("1.1.1.0")]
+[assembly: AssemblyInformationalVersion("1.1.1")]
 
 internal static class Program
 {
@@ -2270,7 +2270,7 @@ internal sealed class MainWindow : Window
     private void ToggleSingleClickZoom()
     {
         if (singleImage.Source == null) return;
-        if (!fitSingleImage && Math.Abs(singleZoom - 2.0) < 0.01)
+        if (!fitSingleImage && Math.Abs(singleZoom - 1.0) < 0.01)
         {
             fitSingleImage = true;
             ApplySingleZoom();
@@ -2278,7 +2278,7 @@ internal sealed class MainWindow : Window
         else
         {
             fitSingleImage = false;
-            singleZoom = 2.0;
+            singleZoom = 1.0;
             ApplySingleZoom();
         }
     }
