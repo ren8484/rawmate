@@ -629,7 +629,7 @@ internal sealed class MainWindow : Window
             BorderThickness = new Thickness(1),
             CornerRadius = new CornerRadius(7)
         };
-        frame.ToolTip = "点击或拖动取景框以定位；适应窗口时点击会切换到 100%";
+        frame.ToolTip = "点击或拖动取景框以定位；适应窗口时会按当前适应比例切换到 100% 或 200%";
 
         var panel = new Grid();
         panel.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
@@ -771,7 +771,7 @@ internal sealed class MainWindow : Window
         if (fitSingleImage || (singleViewer.ScrollableWidth < 0.5 && singleViewer.ScrollableHeight < 0.5))
         {
             fitSingleImage = false;
-            singleZoom = Math.Max(1.0, singleZoom);
+            singleZoom = GetSingleInspectionZoom();
             ApplySingleZoom();
         }
 
@@ -2270,17 +2270,34 @@ internal sealed class MainWindow : Window
     private void ToggleSingleClickZoom()
     {
         if (singleImage.Source == null) return;
-        if (!fitSingleImage && Math.Abs(singleZoom - 1.0) < 0.01)
+        if (fitSingleImage)
         {
-            fitSingleImage = true;
+            fitSingleImage = false;
+            singleZoom = GetSingleInspectionZoom();
             ApplySingleZoom();
         }
         else
         {
-            fitSingleImage = false;
-            singleZoom = 1.0;
+            fitSingleImage = true;
             ApplySingleZoom();
         }
+    }
+
+    private double GetSingleInspectionZoom()
+    {
+        var source = singleImage.Source as BitmapSource;
+        if (source == null) return 1.0;
+        return CalculateSingleFitZoom(source) >= 1.0 ? 2.0 : 1.0;
+    }
+
+    private double CalculateSingleFitZoom(BitmapSource source)
+    {
+        if (source == null) return 1.0;
+        var width = singleViewer.ActualWidth - 16;
+        var height = singleViewer.ActualHeight - 16;
+        if (width <= 0 || height <= 0 || source.Width <= 0 || source.Height <= 0)
+            return Math.Max(0.1, Math.Min(6.0, singleZoom));
+        return Math.Max(0.1, Math.Min(6.0, Math.Min(width / source.Width, height / source.Height)));
     }
 
     private void ZoomBoxKeyDown(object sender, KeyEventArgs e)
@@ -2318,12 +2335,7 @@ internal sealed class MainWindow : Window
         var source = singleImage.Source as BitmapSource;
         if (source == null) return;
         if (fitSingleImage)
-        {
-            var width = singleViewer.ActualWidth - 16;
-            var height = singleViewer.ActualHeight - 16;
-            if (width > 0 && height > 0)
-                singleZoom = Math.Max(0.1, Math.Min(width / source.Width, height / source.Height));
-        }
+            singleZoom = CalculateSingleFitZoom(source);
         singleImage.LayoutTransform = new ScaleTransform(singleZoom, singleZoom);
         zoomBox.Text = Math.Round(singleZoom * 100).ToString(CultureInfo.InvariantCulture) + "%";
         QueueNavigatorUpdate();
