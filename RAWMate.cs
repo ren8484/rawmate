@@ -1178,8 +1178,7 @@ internal sealed class MainWindow : Window
             if (dialog.ShowDialog() == Forms.DialogResult.OK)
             {
                 folderBox.Text = dialog.SelectedPath;
-                RememberFolder(dialog.SelectedPath);
-                ScanDirectory();
+                RefreshCurrentFolder();
             }
         }
     }
@@ -1685,9 +1684,49 @@ internal sealed class MainWindow : Window
 
     private void RefreshCurrentFolder()
     {
+        var root = RootFolder(false);
+        var previousSingleFile = currentSingleFile;
         ClearFullImageCache();
+
+        if (root == null)
+        {
+            currentSingleFile = null;
+            singleViewMode = false;
+            RebuildUi();
+            return;
+        }
+
         ScanDirectory();
+
+        if (singleViewMode)
+        {
+            ClearGallery();
+            EnsureGalleryFiles();
+            var keepCurrent = !String.IsNullOrWhiteSpace(previousSingleFile)
+                           && galleryFiles.Contains(previousSingleFile, StringComparer.OrdinalIgnoreCase);
+            currentSingleFile = keepCurrent ? previousSingleFile : galleryFiles.FirstOrDefault();
+
+            if (String.IsNullOrWhiteSpace(currentSingleFile))
+            {
+                singleViewMode = false;
+                RebuildUi();
+                return;
+            }
+
+            if (!keepCurrent) fitSingleImage = true;
+            RebuildUi();
+            ShowPhotoInfo(currentSingleFile);
+            return;
+        }
+
         RefreshGallery();
+        if (!String.IsNullOrWhiteSpace(previousSingleFile)
+            && galleryFiles.Contains(previousSingleFile, StringComparer.OrdinalIgnoreCase))
+        {
+            currentSingleFile = previousSingleFile;
+            RestoreGridCurrentPhoto();
+        }
+        else currentSingleFile = null;
     }
 
     private void ClearGallery()
