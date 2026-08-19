@@ -122,6 +122,7 @@ internal sealed class MainWindow : Window
     private readonly Dictionary<string, DateTime?> captureDateCache = new Dictionary<string, DateTime?>(StringComparer.OrdinalIgnoreCase);
     private int fullImageCacheGeneration;
     private readonly List<string> recentFolders = new List<string>();
+    private bool forgetFolderHistoryUntilNextScan;
     private readonly string settingsPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RAWMate", "settings.txt");
     private readonly string cullMarksPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RAWMate", "cull-marks.txt");
     private string activeFilter = "all";
@@ -629,7 +630,7 @@ internal sealed class MainWindow : Window
             BorderThickness = new Thickness(1),
             CornerRadius = new CornerRadius(7)
         };
-        frame.ToolTip = "点击或拖动取景框以定位；适应窗口时点击会切换到 100%";
+        frame.ToolTip = "点击或拖动取景框以定位；适应窗口时会按当前适应比例切换到 100% 或 200%";
 
         var panel = new Grid();
         panel.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
@@ -771,7 +772,7 @@ internal sealed class MainWindow : Window
         if (fitSingleImage || (singleViewer.ScrollableWidth < 0.5 && singleViewer.ScrollableHeight < 0.5))
         {
             fitSingleImage = false;
-            singleZoom = Math.Max(1.0, singleZoom);
+            singleZoom = GetSingleInspectionZoom();
             ApplySingleZoom();
         }
 
@@ -1178,8 +1179,7 @@ internal sealed class MainWindow : Window
             if (dialog.ShowDialog() == Forms.DialogResult.OK)
             {
                 folderBox.Text = dialog.SelectedPath;
-                RememberFolder(dialog.SelectedPath);
-                ScanDirectory();
+                RefreshCurrentFolder();
             }
         }
     }
@@ -1194,6 +1194,7 @@ internal sealed class MainWindow : Window
     private void OpenFolderHistory(object sender, RoutedEventArgs e)
     {
         var menu = new ContextMenu { Background = darkMode ? Brush("#242A31") : Brush("#FFFFFF"), Foreground = darkMode ? Brush("#F0F4F8") : Brush("#1F2937"), PlacementTarget = folderHistoryButton, Placement = PlacementMode.Bottom };
+        StyleFolderHistoryMenu(menu);
         if (recentFolders.Count == 0)
         {
             var empty = new MenuItem { Header = "暂无最近目录", IsEnabled = false };
@@ -1209,8 +1210,39 @@ internal sealed class MainWindow : Window
                 item.Click += delegate { folderBox.Text = folder; RefreshCurrentFolder(); };
                 menu.Items.Add(item);
             }
+
+            var clearHistory = new MenuItem
+            {
+                Header = "清除路径记录",
+                Height = 30,
+                Margin = new Thickness(8, 6, 8, 8),
+                Padding = new Thickness(12, 0, 12, 0),
+                Background = Brush("#8A4650"),
+                Foreground = Brushes.White,
+                BorderThickness = new Thickness(0),
+                FontSize = 12,
+                FontWeight = FontWeights.SemiBold,
+                Cursor = Cursors.Hand,
+                ToolTip = "清除最近目录；当前目录保持打开"
+            };
+            StyleRoundedContextMenuAction(clearHistory);
+            clearHistory.Click += delegate
+            {
+                menu.IsOpen = false;
+                ClearFolderHistory();
+            };
+            menu.Items.Add(clearHistory);
         }
         menu.IsOpen = true;
+    }
+
+    private void ClearFolderHistory()
+    {
+        recentFolders.Clear();
+        lastFolder = null;
+        forgetFolderHistoryUntilNextScan = true;
+        SaveSettings();
+        SetStatus("路径记录已清除；当前目录仍可继续使用。重新选择或刷新后会再次记忆。", false);
     }
 
     private void ResetUiControls(string currentFolder)
@@ -1269,6 +1301,7 @@ internal sealed class MainWindow : Window
     private void RememberFolder(string folder)
     {
         if (String.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder)) return;
+        forgetFolderHistoryUntilNextScan = false;
         recentFolders.RemoveAll(item => String.Equals(item, folder, StringComparison.OrdinalIgnoreCase));
         recentFolders.Insert(0, folder);
         if (recentFolders.Count > 3) recentFolders.RemoveRange(3, recentFolders.Count - 3);
@@ -1328,7 +1361,7 @@ internal sealed class MainWindow : Window
             Directory.CreateDirectory(Path.GetDirectoryName(settingsPath));
             var lines = new List<string>();
             var currentFolder = folderBox == null ? lastFolder : (folderBox.Text ?? String.Empty).Trim();
-            lines.Add("last_folder=" + (currentFolder ?? String.Empty));
+            lines.Add("last_folder=" + (forgetFolderHistoryUntilNextScan ? String.Empty : (currentFolder ?? String.Empty)));
             lines.Add("view=" + (singleViewMode ? "single" : "grid"));
             lines.Add("current_photo=" + (currentSingleFile ?? String.Empty));
             lines.Add("single_fit=" + (fitSingleImage ? "true" : "false"));
@@ -1337,7 +1370,8 @@ internal sealed class MainWindow : Window
             lines.Add("sort=" + gallerySortMode);
             lines.Add("filter=" + activeFilter);
             lines.Add("auto_advance=" + (autoAdvanceEnabled ? "true" : "false"));
-            lines.AddRange(recentFolders.Take(3).Select(folder => "folder=" + folder));
+            if (!forgetFolderHistoryUntilNextScan)
+                lines.AddRange(recentFolders.Take(3).Select(folder => "folder=" + folder));
             File.WriteAllLines(settingsPath, lines);
         }
         catch { }
@@ -1685,9 +1719,49 @@ internal sealed class MainWindow : Window
 
     private void RefreshCurrentFolder()
     {
+        var root = RootFolder(false);
+        var previousSingleFile = currentSingleFile;
         ClearFullImageCache();
+
+        if (root == null)
+        {
+            currentSingleFile = null;
+            singleViewMode = false;
+            RebuildUi();
+            return;
+        }
+
         ScanDirectory();
+
+        if (singleViewMode)
+        {
+            ClearGallery();
+            EnsureGalleryFiles();
+            var keepCurrent = !String.IsNullOrWhiteSpace(previousSingleFile)
+                           && galleryFiles.Contains(previousSingleFile, StringComparer.OrdinalIgnoreCase);
+            currentSingleFile = keepCurrent ? previousSingleFile : galleryFiles.FirstOrDefault();
+
+            if (String.IsNullOrWhiteSpace(currentSingleFile))
+            {
+                singleViewMode = false;
+                RebuildUi();
+                return;
+            }
+
+            if (!keepCurrent) fitSingleImage = true;
+            RebuildUi();
+            ShowPhotoInfo(currentSingleFile);
+            return;
+        }
+
         RefreshGallery();
+        if (!String.IsNullOrWhiteSpace(previousSingleFile)
+            && galleryFiles.Contains(previousSingleFile, StringComparer.OrdinalIgnoreCase))
+        {
+            currentSingleFile = previousSingleFile;
+            RestoreGridCurrentPhoto();
+        }
+        else currentSingleFile = null;
     }
 
     private void ClearGallery()
@@ -2270,17 +2344,34 @@ internal sealed class MainWindow : Window
     private void ToggleSingleClickZoom()
     {
         if (singleImage.Source == null) return;
-        if (!fitSingleImage && Math.Abs(singleZoom - 1.0) < 0.01)
+        if (fitSingleImage)
         {
-            fitSingleImage = true;
+            fitSingleImage = false;
+            singleZoom = GetSingleInspectionZoom();
             ApplySingleZoom();
         }
         else
         {
-            fitSingleImage = false;
-            singleZoom = 1.0;
+            fitSingleImage = true;
             ApplySingleZoom();
         }
+    }
+
+    private double GetSingleInspectionZoom()
+    {
+        var source = singleImage.Source as BitmapSource;
+        if (source == null) return 1.0;
+        return CalculateSingleFitZoom(source) >= 1.0 ? 2.0 : 1.0;
+    }
+
+    private double CalculateSingleFitZoom(BitmapSource source)
+    {
+        if (source == null) return 1.0;
+        var width = singleViewer.ActualWidth - 16;
+        var height = singleViewer.ActualHeight - 16;
+        if (width <= 0 || height <= 0 || source.Width <= 0 || source.Height <= 0)
+            return Math.Max(0.1, Math.Min(6.0, singleZoom));
+        return Math.Max(0.1, Math.Min(6.0, Math.Min(width / source.Width, height / source.Height)));
     }
 
     private void ZoomBoxKeyDown(object sender, KeyEventArgs e)
@@ -2318,12 +2409,7 @@ internal sealed class MainWindow : Window
         var source = singleImage.Source as BitmapSource;
         if (source == null) return;
         if (fitSingleImage)
-        {
-            var width = singleViewer.ActualWidth - 16;
-            var height = singleViewer.ActualHeight - 16;
-            if (width > 0 && height > 0)
-                singleZoom = Math.Max(0.1, Math.Min(width / source.Width, height / source.Height));
-        }
+            singleZoom = CalculateSingleFitZoom(source);
         singleImage.LayoutTransform = new ScaleTransform(singleZoom, singleZoom);
         zoomBox.Text = Math.Round(singleZoom * 100).ToString(CultureInfo.InvariantCulture) + "%";
         QueueNavigatorUpdate();
@@ -2840,6 +2926,40 @@ internal sealed class MainWindow : Window
         var presenter = new FrameworkElementFactory(typeof(ContentPresenter));
         presenter.SetValue(ContentPresenter.ContentSourceProperty, "Header");
         presenter.SetValue(ContentPresenter.HorizontalAlignmentProperty, HorizontalAlignment.Stretch);
+        presenter.SetValue(ContentPresenter.VerticalAlignmentProperty, VerticalAlignment.Center);
+        presenter.SetValue(ContentPresenter.MarginProperty, item.Padding);
+        border.AppendChild(presenter);
+        var template = new ControlTemplate(typeof(MenuItem));
+        template.VisualTree = border;
+        item.Template = template;
+    }
+
+    private static void StyleFolderHistoryMenu(ContextMenu menu)
+    {
+        menu.Padding = new Thickness(0);
+        menu.BorderThickness = new Thickness(0);
+        menu.SnapsToDevicePixels = true;
+        var border = new FrameworkElementFactory(typeof(Border));
+        border.SetValue(Border.BackgroundProperty, menu.Background);
+        border.SetValue(Border.BorderBrushProperty, darkMode ? Brush("#4A5664") : Brush("#B7C3D0"));
+        border.SetValue(Border.BorderThicknessProperty, new Thickness(1));
+        border.SetValue(Border.CornerRadiusProperty, new CornerRadius(6));
+        var presenter = new FrameworkElementFactory(typeof(ItemsPresenter));
+        presenter.SetValue(FrameworkElement.MarginProperty, new Thickness(0));
+        border.AppendChild(presenter);
+        var template = new ControlTemplate(typeof(ContextMenu));
+        template.VisualTree = border;
+        menu.Template = template;
+    }
+
+    private static void StyleRoundedContextMenuAction(MenuItem item)
+    {
+        var border = new FrameworkElementFactory(typeof(Border));
+        border.SetValue(Border.CornerRadiusProperty, new CornerRadius(5));
+        border.SetValue(Border.BackgroundProperty, item.Background);
+        var presenter = new FrameworkElementFactory(typeof(ContentPresenter));
+        presenter.SetValue(ContentPresenter.ContentSourceProperty, "Header");
+        presenter.SetValue(ContentPresenter.HorizontalAlignmentProperty, HorizontalAlignment.Center);
         presenter.SetValue(ContentPresenter.VerticalAlignmentProperty, VerticalAlignment.Center);
         presenter.SetValue(ContentPresenter.MarginProperty, item.Padding);
         border.AppendChild(presenter);
