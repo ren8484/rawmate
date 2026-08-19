@@ -122,6 +122,7 @@ internal sealed class MainWindow : Window
     private readonly Dictionary<string, DateTime?> captureDateCache = new Dictionary<string, DateTime?>(StringComparer.OrdinalIgnoreCase);
     private int fullImageCacheGeneration;
     private readonly List<string> recentFolders = new List<string>();
+    private bool forgetFolderHistoryUntilNextScan;
     private readonly string settingsPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RAWMate", "settings.txt");
     private readonly string cullMarksPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RAWMate", "cull-marks.txt");
     private string activeFilter = "all";
@@ -1193,6 +1194,7 @@ internal sealed class MainWindow : Window
     private void OpenFolderHistory(object sender, RoutedEventArgs e)
     {
         var menu = new ContextMenu { Background = darkMode ? Brush("#242A31") : Brush("#FFFFFF"), Foreground = darkMode ? Brush("#F0F4F8") : Brush("#1F2937"), PlacementTarget = folderHistoryButton, Placement = PlacementMode.Bottom };
+        StyleFolderHistoryMenu(menu);
         if (recentFolders.Count == 0)
         {
             var empty = new MenuItem { Header = "暂无最近目录", IsEnabled = false };
@@ -1208,8 +1210,39 @@ internal sealed class MainWindow : Window
                 item.Click += delegate { folderBox.Text = folder; RefreshCurrentFolder(); };
                 menu.Items.Add(item);
             }
+
+            var clearHistory = new MenuItem
+            {
+                Header = "清除路径记录",
+                Height = 30,
+                Margin = new Thickness(8, 6, 8, 8),
+                Padding = new Thickness(12, 0, 12, 0),
+                Background = Brush("#8A4650"),
+                Foreground = Brushes.White,
+                BorderThickness = new Thickness(0),
+                FontSize = 12,
+                FontWeight = FontWeights.SemiBold,
+                Cursor = Cursors.Hand,
+                ToolTip = "清除最近目录；当前目录保持打开"
+            };
+            StyleRoundedContextMenuAction(clearHistory);
+            clearHistory.Click += delegate
+            {
+                menu.IsOpen = false;
+                ClearFolderHistory();
+            };
+            menu.Items.Add(clearHistory);
         }
         menu.IsOpen = true;
+    }
+
+    private void ClearFolderHistory()
+    {
+        recentFolders.Clear();
+        lastFolder = null;
+        forgetFolderHistoryUntilNextScan = true;
+        SaveSettings();
+        SetStatus("路径记录已清除；当前目录仍可继续使用。重新选择或刷新后会再次记忆。", false);
     }
 
     private void ResetUiControls(string currentFolder)
@@ -1268,6 +1301,7 @@ internal sealed class MainWindow : Window
     private void RememberFolder(string folder)
     {
         if (String.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder)) return;
+        forgetFolderHistoryUntilNextScan = false;
         recentFolders.RemoveAll(item => String.Equals(item, folder, StringComparison.OrdinalIgnoreCase));
         recentFolders.Insert(0, folder);
         if (recentFolders.Count > 3) recentFolders.RemoveRange(3, recentFolders.Count - 3);
@@ -1327,7 +1361,7 @@ internal sealed class MainWindow : Window
             Directory.CreateDirectory(Path.GetDirectoryName(settingsPath));
             var lines = new List<string>();
             var currentFolder = folderBox == null ? lastFolder : (folderBox.Text ?? String.Empty).Trim();
-            lines.Add("last_folder=" + (currentFolder ?? String.Empty));
+            lines.Add("last_folder=" + (forgetFolderHistoryUntilNextScan ? String.Empty : (currentFolder ?? String.Empty)));
             lines.Add("view=" + (singleViewMode ? "single" : "grid"));
             lines.Add("current_photo=" + (currentSingleFile ?? String.Empty));
             lines.Add("single_fit=" + (fitSingleImage ? "true" : "false"));
@@ -1336,7 +1370,8 @@ internal sealed class MainWindow : Window
             lines.Add("sort=" + gallerySortMode);
             lines.Add("filter=" + activeFilter);
             lines.Add("auto_advance=" + (autoAdvanceEnabled ? "true" : "false"));
-            lines.AddRange(recentFolders.Take(3).Select(folder => "folder=" + folder));
+            if (!forgetFolderHistoryUntilNextScan)
+                lines.AddRange(recentFolders.Take(3).Select(folder => "folder=" + folder));
             File.WriteAllLines(settingsPath, lines);
         }
         catch { }
@@ -2891,6 +2926,40 @@ internal sealed class MainWindow : Window
         var presenter = new FrameworkElementFactory(typeof(ContentPresenter));
         presenter.SetValue(ContentPresenter.ContentSourceProperty, "Header");
         presenter.SetValue(ContentPresenter.HorizontalAlignmentProperty, HorizontalAlignment.Stretch);
+        presenter.SetValue(ContentPresenter.VerticalAlignmentProperty, VerticalAlignment.Center);
+        presenter.SetValue(ContentPresenter.MarginProperty, item.Padding);
+        border.AppendChild(presenter);
+        var template = new ControlTemplate(typeof(MenuItem));
+        template.VisualTree = border;
+        item.Template = template;
+    }
+
+    private static void StyleFolderHistoryMenu(ContextMenu menu)
+    {
+        menu.Padding = new Thickness(0);
+        menu.BorderThickness = new Thickness(0);
+        menu.SnapsToDevicePixels = true;
+        var border = new FrameworkElementFactory(typeof(Border));
+        border.SetValue(Border.BackgroundProperty, menu.Background);
+        border.SetValue(Border.BorderBrushProperty, darkMode ? Brush("#4A5664") : Brush("#B7C3D0"));
+        border.SetValue(Border.BorderThicknessProperty, new Thickness(1));
+        border.SetValue(Border.CornerRadiusProperty, new CornerRadius(6));
+        var presenter = new FrameworkElementFactory(typeof(ItemsPresenter));
+        presenter.SetValue(FrameworkElement.MarginProperty, new Thickness(0));
+        border.AppendChild(presenter);
+        var template = new ControlTemplate(typeof(ContextMenu));
+        template.VisualTree = border;
+        menu.Template = template;
+    }
+
+    private static void StyleRoundedContextMenuAction(MenuItem item)
+    {
+        var border = new FrameworkElementFactory(typeof(Border));
+        border.SetValue(Border.CornerRadiusProperty, new CornerRadius(5));
+        border.SetValue(Border.BackgroundProperty, item.Background);
+        var presenter = new FrameworkElementFactory(typeof(ContentPresenter));
+        presenter.SetValue(ContentPresenter.ContentSourceProperty, "Header");
+        presenter.SetValue(ContentPresenter.HorizontalAlignmentProperty, HorizontalAlignment.Center);
         presenter.SetValue(ContentPresenter.VerticalAlignmentProperty, VerticalAlignment.Center);
         presenter.SetValue(ContentPresenter.MarginProperty, item.Padding);
         border.AppendChild(presenter);
