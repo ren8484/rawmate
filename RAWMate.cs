@@ -13,6 +13,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
+using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Markup;
 using System.Windows.Media;
@@ -25,9 +26,9 @@ using Forms = System.Windows.Forms;
 [assembly: AssemblyCompany("ren8484")]
 [assembly: AssemblyProduct("RAWMate")]
 [assembly: AssemblyCopyright("Copyright © 2026 ren8484")]
-[assembly: AssemblyVersion("1.1.2.0")]
-[assembly: AssemblyFileVersion("1.1.2.0")]
-[assembly: AssemblyInformationalVersion("1.1.2")]
+[assembly: AssemblyVersion("1.2.0.0")]
+[assembly: AssemblyFileVersion("1.2.0.0")]
+[assembly: AssemblyInformationalVersion("1.2.0")]
 
 internal static class Program
 {
@@ -66,8 +67,6 @@ internal sealed class MainWindow : Window
     private TextBlock cullProgressPercent = new TextBlock();
     private TextBlock pickedProgressCount = new TextBlock();
     private TextBlock rejectedProgressCount = new TextBlock();
-    private TextBlock unprocessedProgressCount = new TextBlock();
-    private TextBlock ratedProgressCount = new TextBlock();
     private ColumnDefinition cullProgressFillColumn = new ColumnDefinition();
     private ColumnDefinition cullProgressRemainingColumn = new ColumnDefinition();
     private TextBlock galleryCaption = new TextBlock();
@@ -100,7 +99,6 @@ internal sealed class MainWindow : Window
     private readonly List<string> galleryFiles = new List<string>();
     private readonly HashSet<string> pickedFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> rejectedFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-    private readonly Dictionary<string, int> starRatings = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
     private Border selectionAnchor;
     private string currentSingleFile;
     private bool singleViewMode;
@@ -424,28 +422,57 @@ internal sealed class MainWindow : Window
             ClipToBounds = true
         });
 
-        var counts = new Grid { Margin = new Thickness(0, 9, 0, 0) };
-        for (var index = 0; index < 4; index++)
+        var counts = new Grid { Margin = new Thickness(0, 14, 0, 0) };
+        for (var index = 0; index < 2; index++)
             counts.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        AddProgressStat(counts, pickedProgressCount, "✓", "#58D26E", "保留", 0);
-        AddProgressStat(counts, rejectedProgressCount, "✕", "#F0667A", "废片", 1);
-        AddProgressStat(counts, unprocessedProgressCount, "○", "#A6AFBA", "未处理", 2);
-        AddProgressStat(counts, ratedProgressCount, "★", "#FFB84D", "已评分（可与旗标重叠）", 3);
+        AddProgressOutcome(counts, pickedProgressCount, "P", "保留", "#58D26E", 0);
+        AddProgressOutcome(counts, rejectedProgressCount, "X", "废片", "#F0667A", 1);
         panel.Children.Add(counts);
         UpdateCullProgress();
         return panel;
     }
 
-    private static void AddProgressStat(Grid host, TextBlock block, string symbol, string color, string toolTip, int column)
+    private static void AddProgressOutcome(Grid host, TextBlock block, string shortcut, string label, string color, int column)
     {
+        var group = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            VerticalAlignment = VerticalAlignment.Center,
+            HorizontalAlignment = column == 0 ? HorizontalAlignment.Left : HorizontalAlignment.Right,
+            Margin = column == 0 ? new Thickness(12, 0, 0, 0) : new Thickness(0, 0, 12, 0)
+        };
+        group.Children.Add(new Border
+        {
+            Width = 18,
+            Height = 18,
+            CornerRadius = new CornerRadius(4),
+            Background = Brush("#20" + color.Substring(1)),
+            BorderBrush = Brush("#70" + color.Substring(1)),
+            BorderThickness = new Thickness(1),
+            Child = new TextBlock
+            {
+                Text = shortcut,
+                FontSize = 10,
+                Foreground = Brush(color),
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+                TextAlignment = TextAlignment.Center
+            }
+        });
         block.FontSize = 12;
-        block.FontWeight = FontWeights.SemiBold;
-        block.Foreground = Brush(color);
-        block.HorizontalAlignment = column == 0 ? HorizontalAlignment.Left : column == 3 ? HorizontalAlignment.Right : HorizontalAlignment.Center;
-        block.ToolTip = toolTip;
-        block.Text = symbol + " 0";
-        Grid.SetColumn(block, column);
-        host.Children.Add(block);
+        block.VerticalAlignment = VerticalAlignment.Center;
+        block.Margin = new Thickness(7, 0, 0, 0);
+        SetProgressOutcomeText(block, label, color, 0);
+        group.Children.Add(block);
+        Grid.SetColumn(group, column);
+        host.Children.Add(group);
+    }
+
+    private static void SetProgressOutcomeText(TextBlock block, string label, string color, int count)
+    {
+        block.Inlines.Clear();
+        block.Inlines.Add(new Run(label + "  ") { Foreground = Brush("#B5C0CD") });
+        block.Inlines.Add(new Run(count.ToString("N0")) { Foreground = Brush(color), FontSize = 12 });
     }
 
     private void UpdateCullProgress()
@@ -456,19 +483,15 @@ internal sealed class MainWindow : Window
         var total = currentFiles.Count;
         var picked = currentFiles.Count(pickedFiles.Contains);
         var rejected = currentFiles.Count(rejectedFiles.Contains);
-        var processed = picked + rejected;
-        var unprocessed = Math.Max(0, total - processed);
-        var rated = currentFiles.Count(file => starRatings.ContainsKey(file) && starRatings[file] > 0);
-        var percent = total > 0 ? (int)Math.Round(processed * 100.0 / total) : 0;
+        var decided = picked + rejected;
+        var percent = total > 0 ? (int)Math.Round(decided * 100.0 / total) : 0;
 
-        cullProgressCount.Text = processed.ToString("N0") + " / " + total.ToString("N0");
+        cullProgressCount.Text = "已决定 " + decided.ToString("N0") + " / " + total.ToString("N0");
         cullProgressPercent.Text = percent + "%";
-        pickedProgressCount.Text = "✓ " + picked.ToString("N0");
-        rejectedProgressCount.Text = "✕ " + rejected.ToString("N0");
-        unprocessedProgressCount.Text = "○ " + unprocessed.ToString("N0");
-        ratedProgressCount.Text = "★ " + rated.ToString("N0");
-        cullProgressFillColumn.Width = new GridLength(total > 0 ? processed : 0, GridUnitType.Star);
-        cullProgressRemainingColumn.Width = new GridLength(total > 0 ? total - processed : 1, GridUnitType.Star);
+        SetProgressOutcomeText(pickedProgressCount, "保留", "#58D26E", picked);
+        SetProgressOutcomeText(rejectedProgressCount, "废片", "#F0667A", rejected);
+        cullProgressFillColumn.Width = new GridLength(total > 0 ? decided : 0, GridUnitType.Star);
+        cullProgressRemainingColumn.Width = new GridLength(total > 0 ? total - decided : 1, GridUnitType.Star);
     }
 
     private UIElement BuildGalleryCard()
@@ -927,8 +950,7 @@ internal sealed class MainWindow : Window
         {
             case "picked": return "保留";
             case "rejected": return "废片";
-            case "rated": return "已评分";
-            case "unmarked": return "未标记";
+            case "undecided": return "未决定";
             default: return "全部照片";
         }
     }
@@ -939,8 +961,7 @@ internal sealed class MainWindow : Window
         AddFilterMenuItem(menu, "全部照片", "all");
         AddFilterMenuItem(menu, "旗标：保留", "picked");
         AddFilterMenuItem(menu, "旗标：废片", "rejected");
-        AddFilterMenuItem(menu, "已有星级", "rated");
-        AddFilterMenuItem(menu, "未标记", "unmarked");
+        AddFilterMenuItem(menu, "未决定", "undecided");
         menu.IsOpen = true;
     }
 
@@ -1260,8 +1281,6 @@ internal sealed class MainWindow : Window
         cullProgressPercent = new TextBlock();
         pickedProgressCount = new TextBlock();
         rejectedProgressCount = new TextBlock();
-        unprocessedProgressCount = new TextBlock();
-        ratedProgressCount = new TextBlock();
         cullProgressFillColumn = new ColumnDefinition();
         cullProgressRemainingColumn = new ColumnDefinition();
         galleryCaption = new TextBlock();
@@ -1401,9 +1420,10 @@ internal sealed class MainWindow : Window
         {
             case "picked":
             case "rejected":
-            case "rated":
-            case "unmarked":
+            case "undecided":
                 return value.ToLowerInvariant();
+            case "unmarked":
+                return "undecided";
             default:
                 return "all";
         }
@@ -1451,15 +1471,26 @@ internal sealed class MainWindow : Window
             {
                 var parts = line.Split('|');
                 if (parts.Length < 2) continue;
-                var file = System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(parts[1]));
-                if (String.IsNullOrWhiteSpace(file)) continue;
-                if (parts[0] == "P") pickedFiles.Add(file);
-                else if (parts[0] == "X") rejectedFiles.Add(file);
-                else if (parts[0] == "R" && parts.Length >= 3)
+                // RAWMate 1.1.x may contain legacy R records. 1.2.0 intentionally ignores
+                // every non-P/X record before decoding it, so legacy or malformed lines
+                // cannot prevent the remaining P/X decisions from loading.
+                if (parts[0] != "P" && parts[0] != "X") continue;
+                try
                 {
-                    int rating;
-                    if (Int32.TryParse(parts[2], out rating) && rating > 0) starRatings[file] = rating;
+                    var file = System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(parts[1]));
+                    if (String.IsNullOrWhiteSpace(file)) continue;
+                    if (parts[0] == "P")
+                    {
+                        pickedFiles.Add(file);
+                        rejectedFiles.Remove(file);
+                    }
+                    else
+                    {
+                        rejectedFiles.Add(file);
+                        pickedFiles.Remove(file);
+                    }
                 }
+                catch { }
             }
         }
         catch { }
@@ -1473,7 +1504,6 @@ internal sealed class MainWindow : Window
             var lines = new List<string>();
             foreach (var file in pickedFiles) lines.Add("P|" + Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(file)));
             foreach (var file in rejectedFiles) lines.Add("X|" + Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(file)));
-            foreach (var item in starRatings.Where(item => item.Value > 0)) lines.Add("R|" + Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(item.Key)) + "|" + item.Value);
             File.WriteAllLines(cullMarksPath, lines);
         }
         catch { }
@@ -1674,12 +1704,6 @@ internal sealed class MainWindow : Window
     {
         if (pickedFiles.Remove(source)) pickedFiles.Add(destination);
         if (rejectedFiles.Remove(source)) rejectedFiles.Add(destination);
-        int rating;
-        if (starRatings.TryGetValue(source, out rating))
-        {
-            starRatings.Remove(source);
-            starRatings[destination] = rating;
-        }
         if (selectedFiles.Remove(source)) selectedFiles.Add(destination);
         if (String.Equals(currentSingleFile, source, StringComparison.OrdinalIgnoreCase)) currentSingleFile = destination;
     }
@@ -1702,7 +1726,7 @@ internal sealed class MainWindow : Window
         foreach (var jpg in visibleJpgs) gallery.Children.Add(CreateTile(jpg));
         QueueVisibleThumbnailLoads();
         galleryCaption.Text = "筛选：" + FilterLabel() + " · " + visibleJpgs.Count + "/" + jpgs.Count + " 张 · 单击选择，双击单张浏览";
-        SetStatus("快捷键：P 标记保留 · X / Delete 标记废片 · 1–5 星评分\n← / → 切换照片 · 空格切换单张与网格视图", false);
+        SetStatus("快捷键：P 标记保留 · X / Delete 标记废片\n← / → 切换照片 · 空格切换单张与网格视图", false);
     }
 
     private bool MatchesFilter(string file)
@@ -1711,8 +1735,7 @@ internal sealed class MainWindow : Window
         {
             case "picked": return pickedFiles.Contains(file);
             case "rejected": return rejectedFiles.Contains(file);
-            case "rated": return starRatings.ContainsKey(file) && starRatings[file] > 0;
-            case "unmarked": return !pickedFiles.Contains(file) && !rejectedFiles.Contains(file) && (!starRatings.ContainsKey(file) || starRatings[file] <= 0);
+            case "undecided": return !pickedFiles.Contains(file) && !rejectedFiles.Contains(file);
             default: return true;
         }
     }
@@ -1879,8 +1902,6 @@ internal sealed class MainWindow : Window
         var parts = new List<string>();
         if (pickedFiles.Contains(file)) parts.Add("P");
         if (rejectedFiles.Contains(file)) parts.Add("X");
-        int rating;
-        if (starRatings.TryGetValue(file, out rating) && rating > 0) parts.Add(new String('★', rating));
         return String.Join(" ", parts.ToArray());
     }
 
@@ -2026,21 +2047,6 @@ internal sealed class MainWindow : Window
             e.Handled = true;
             return;
         }
-        var stars = StarKeyValue(e.Key);
-        if (stars >= 0)
-        {
-            var shouldAdvance = autoAdvanceEnabled && stars > 0;
-            var next = shouldAdvance ? NextPhotoForAutoAdvance(active) : null;
-            SetStarRating(active, stars, next, shouldAdvance);
-            e.Handled = true;
-        }
-    }
-
-    private static int StarKeyValue(Key key)
-    {
-        if (key >= Key.D0 && key <= Key.D5) return (int)key - (int)Key.D0;
-        if (key >= Key.NumPad0 && key <= Key.NumPad5) return (int)key - (int)Key.NumPad0;
-        return -1;
     }
 
     private string ActivePhotoFile()
@@ -2093,14 +2099,6 @@ internal sealed class MainWindow : Window
         else { rejectedFiles.Add(file); pickedFiles.Remove(file); }
         SaveCullMarks();
         ApplyCullChange(file, "废片旗标已更新。可点击“移除所有废片”统一清理。", nextFile, advanceRequested);
-    }
-
-    private void SetStarRating(string file, int rating, string nextFile = null, bool advanceRequested = false)
-    {
-        if (rating <= 0) starRatings.Remove(file);
-        else starRatings[file] = rating;
-        SaveCullMarks();
-        ApplyCullChange(file, rating <= 0 ? "已清除星级。" : "已评为 " + rating + " 星。", nextFile, advanceRequested);
     }
 
     private void ApplyCullChange(string file, string message, string nextFile, bool advanceRequested)
@@ -2494,7 +2492,6 @@ internal sealed class MainWindow : Window
         {
             rejectedFiles.Remove(jpg);
             pickedFiles.Remove(jpg);
-            starRatings.Remove(jpg);
         }
         SaveCullMarks();
         RefreshCurrentFolder();
@@ -2788,14 +2785,31 @@ internal sealed class MainWindow : Window
 
     private static UIElement Stat(string label, TextBlock value, string color)
     {
-        var panel = new StackPanel();
-        panel.Children.Add(new TextBlock { Text = label, FontSize = 13, Foreground = Brush("#6A7787") });
+        var panel = new StackPanel { HorizontalAlignment = HorizontalAlignment.Stretch };
+        panel.Children.Add(new TextBlock
+        {
+            Text = label,
+            FontSize = 13,
+            Foreground = Brush("#6A7787"),
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            TextAlignment = TextAlignment.Center
+        });
         value.Text = "—";
-        value.Margin = new Thickness(0, 3, 0, 0);
+        value.Margin = new Thickness(0);
         value.FontSize = 22;
         value.FontWeight = FontWeights.SemiBold;
         value.Foreground = Brush(color);
-        panel.Children.Add(value);
+        value.HorizontalAlignment = HorizontalAlignment.Center;
+        value.TextAlignment = TextAlignment.Center;
+        panel.Children.Add(new Viewbox
+        {
+            Child = value,
+            Height = 30,
+            Margin = new Thickness(6, 3, 6, 0),
+            Stretch = Stretch.Uniform,
+            StretchDirection = StretchDirection.DownOnly,
+            HorizontalAlignment = HorizontalAlignment.Stretch
+        });
         return panel;
     }
 
