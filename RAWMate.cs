@@ -15,6 +15,7 @@ using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Documents;
 using System.Windows.Input;
+using System.Windows.Interop;
 using System.Windows.Markup;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
@@ -26,9 +27,9 @@ using Forms = System.Windows.Forms;
 [assembly: AssemblyCompany("ren8484")]
 [assembly: AssemblyProduct("RAWMate")]
 [assembly: AssemblyCopyright("Copyright © 2026 ren8484")]
-[assembly: AssemblyVersion("1.2.0.0")]
-[assembly: AssemblyFileVersion("1.2.0.0")]
-[assembly: AssemblyInformationalVersion("1.2.0")]
+[assembly: AssemblyVersion("1.2.1.0")]
+[assembly: AssemblyFileVersion("1.2.1.0")]
+[assembly: AssemblyInformationalVersion("1.2.1")]
 
 internal static class Program
 {
@@ -138,6 +139,11 @@ internal sealed class MainWindow : Window
     // matches the original usable content width so large screens are not rescaled.
     private const double SidebarContentWidth = 280;
     private const string ButtonBlue = "#436794";
+    private const int DwmUseImmersiveDarkModeBefore20H1 = 19;
+    private const int DwmUseImmersiveDarkMode = 20;
+    private const int DwmBorderColor = 34;
+    private const int DwmCaptionColor = 35;
+    private const int DwmTextColor = 36;
 
     private static readonly string[] JpgExtensions = { ".jpg", ".jpeg" };
     private static readonly string[] RawExtensions = { ".arw" };
@@ -148,10 +154,11 @@ internal sealed class MainWindow : Window
         ApplyInitialWindowSize();
         WindowStartupLocation = WindowStartupLocation.CenterScreen;
         FontFamily = new FontFamily("Microsoft YaHei UI");
+        SourceInitialized += delegate { ApplyDarkTitleBar(); };
         LoadSettings();
         LoadCullMarks();
         if (!String.IsNullOrWhiteSpace(lastFolder)) folderBox.Text = lastFolder;
-        Background = Brush("#F4F7FB");
+        Background = Brush("#171B21");
         UseLayoutRounding = true;
         SnapsToDevicePixels = true;
         try { Icon = BitmapFrame.Create(new Uri(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "RAWMate.ico"), UriKind.Absolute)); } catch { }
@@ -182,13 +189,58 @@ internal sealed class MainWindow : Window
         Height = Math.Min(DefaultWindowHeight, availableHeight);
     }
 
+    private void ApplyDarkTitleBar()
+    {
+        // Keep the native Windows caption and its resize/system-menu behavior, but
+        // make it visually continuous with RAWMate's fixed-dark workspace.
+        try
+        {
+            var handle = new WindowInteropHelper(this).Handle;
+            if (handle == IntPtr.Zero) return;
+
+            var enabled = 1;
+            if (DwmSetWindowAttribute(handle, DwmUseImmersiveDarkMode, ref enabled, sizeof(int)) != 0)
+                DwmSetWindowAttribute(handle, DwmUseImmersiveDarkModeBefore20H1, ref enabled, sizeof(int));
+
+            // DWM COLORREF uses 0x00BBGGRR. Unsupported attributes are safely ignored
+            // on older Windows builds, while immersive dark mode still supplies light glyphs.
+            var captionColor = ColorRef(0x20, 0x26, 0x2E);
+            var borderColor = ColorRef(0x36, 0x40, 0x4B);
+            var textColor = ColorRef(0xFF, 0xFF, 0xFF);
+            DwmSetWindowAttribute(handle, DwmCaptionColor, ref captionColor, sizeof(int));
+            DwmSetWindowAttribute(handle, DwmBorderColor, ref borderColor, sizeof(int));
+            DwmSetWindowAttribute(handle, DwmTextColor, ref textColor, sizeof(int));
+        }
+        catch
+        {
+            // Title-bar theming is cosmetic; never prevent the app from opening.
+        }
+    }
+
+    private static int ColorRef(byte red, byte green, byte blue)
+    {
+        return red | (green << 8) | (blue << 16);
+    }
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmSetWindowAttribute(IntPtr window, int attribute, ref int value, int valueSize);
+
     private UIElement BuildUi()
     {
-        var root = new Grid { Background = Brush("#F4F7FB") };
+        var root = new Grid { Background = Brush("#171B21") };
         root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(SidebarWidth) });
         root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
 
-        var sidebar = new Border { Background = Brush("#FFFFFF"), BorderBrush = Brush("#D9E2EC"), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(9), Margin = new Thickness(6, 6, 3, 6), Padding = new Thickness(14), ClipToBounds = true };
+        // The sidebar is a flat workspace column. A single hairline divider replaces
+        // the former rounded outer card and its surrounding gutter.
+        var sidebar = new Border
+        {
+            Background = Brush("#1B2027"),
+            BorderBrush = Brush("#36404B"),
+            BorderThickness = new Thickness(0, 0, 1, 0),
+            Padding = new Thickness(14, 14, 14, 12),
+            ClipToBounds = true
+        };
         var sidebarLayout = new Grid();
         sidebarLayout.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
         sidebarLayout.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
@@ -223,19 +275,27 @@ internal sealed class MainWindow : Window
         sidebar.Child = sidebarLayout;
         root.Children.Add(sidebar);
 
-        var main = new Grid { Margin = new Thickness(3, 6, 6, 6) };
+        var main = new Grid { Background = Brush("#171B21") };
         main.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
         main.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        var galleryCard = Card();
-        galleryCard.Padding = new Thickness(10);
-        galleryCard.Child = BuildGalleryCard();
-        main.Children.Add(galleryCard);
-        var infoCard = Card();
-        infoCard.Padding = new Thickness(12, 8, 12, 8);
-        infoCard.Margin = new Thickness(0, 6, 0, 0);
-        infoCard.Child = BuildPhotoInfoCard();
-        Grid.SetRow(infoCard, 1);
-        main.Children.Add(infoCard);
+        var workspace = new Border
+        {
+            Background = Brushes.Transparent,
+            BorderThickness = new Thickness(0),
+            Padding = new Thickness(12, 10, 12, 0),
+            Child = BuildGalleryCard()
+        };
+        main.Children.Add(workspace);
+        var infoFooter = new Border
+        {
+            Background = Brushes.Transparent,
+            BorderBrush = Brush("#36404B"),
+            BorderThickness = new Thickness(0, 1, 0, 0),
+            Padding = new Thickness(12, 8, 12, 8),
+            Child = BuildPhotoInfoCard()
+        };
+        Grid.SetRow(infoFooter, 1);
+        main.Children.Add(infoFooter);
         Grid.SetColumn(main, 1);
         root.Children.Add(main);
         return root;
@@ -252,8 +312,6 @@ internal sealed class MainWindow : Window
 
         var metadataIndex = raw.IndexOf('+');
         if (metadataIndex >= 0) raw = raw.Substring(0, metadataIndex);
-        var parts = raw.Split('.');
-        if (parts.Length >= 3) return "V" + parts[0] + "." + parts[1] + parts[2];
         return "V" + raw;
     }
 
@@ -522,7 +580,7 @@ internal sealed class MainWindow : Window
         Grid.SetColumn(topRight, 1);
         title.Children.Add(topRight);
         panel.Children.Add(title);
-        galleryScrollViewer = new ScrollViewer { Margin = new Thickness(0, 14, 0, 0), VerticalScrollBarVisibility = ScrollBarVisibility.Hidden, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, Background = Brush("#FBFCFE"), BorderBrush = Brush("#D9E2EC"), BorderThickness = new Thickness(1), Padding = new Thickness(10, 10, 20, 10) };
+        galleryScrollViewer = new ScrollViewer { Margin = new Thickness(0, 12, 0, 0), VerticalScrollBarVisibility = ScrollBarVisibility.Hidden, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, Background = Brushes.Transparent, BorderThickness = new Thickness(0), Padding = new Thickness(8, 8, 18, 8) };
         var miniScrollBar = CreateMiniVerticalScrollBar();
         var syncingMiniScrollBar = false;
         galleryScrollViewer.ScrollChanged += delegate(object sender, ScrollChangedEventArgs e)
@@ -574,7 +632,7 @@ internal sealed class MainWindow : Window
         header.Children.Add(topRight);
         panel.Children.Add(header);
 
-        var frame = new Border { Margin = new Thickness(0, 8, 0, 0), Background = Brush("#151A20"), BorderBrush = Brush("#D9E2EC"), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(6), ClipToBounds = true };
+        var frame = new Border { Margin = new Thickness(0, 8, 0, 0), Background = Brush("#151A20"), BorderThickness = new Thickness(0), ClipToBounds = true };
         var stage = new Grid();
         singleViewer = new ScrollViewer { HorizontalScrollBarVisibility = ScrollBarVisibility.Hidden, VerticalScrollBarVisibility = ScrollBarVisibility.Hidden, Background = Brushes.Transparent, Focusable = true, Cursor = Cursors.Hand };
         singleImage = new Image { Stretch = Stretch.None, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center, SnapsToDevicePixels = true };
@@ -593,7 +651,7 @@ internal sealed class MainWindow : Window
         stripFrame.HorizontalAlignment = HorizontalAlignment.Center;
         stripFrame.VerticalAlignment = VerticalAlignment.Bottom;
         stage.Children.Add(stripFrame);
-        var controlsFrame = new Border { HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Bottom, Margin = new Thickness(0, 0, 0, 80), Padding = new Thickness(5, 4, 5, 4), Background = Brush("#202833"), BorderBrush = Brush("#3F4B58"), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(7) };
+        var controlsFrame = new Border { HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Bottom, Margin = new Thickness(0, 0, 0, 80), Padding = new Thickness(5, 4, 5, 4), Background = Brush("#E6202833"), BorderThickness = new Thickness(0), CornerRadius = new CornerRadius(5) };
         var controls = new StackPanel { Orientation = Orientation.Horizontal };
         var previous = SingleToolButton("‹", 30, "上一张");
         previous.Margin = new Thickness(0, 0, 4, 0);
@@ -648,10 +706,9 @@ internal sealed class MainWindow : Window
             VerticalAlignment = VerticalAlignment.Top,
             Margin = new Thickness(12),
             Padding = new Thickness(8, 6, 8, 8),
-            Background = darkMode ? Brush("#E61B222B") : Brush("#F2FFFFFF"),
-            BorderBrush = darkMode ? Brush("#526170") : Brush("#B8C5D2"),
-            BorderThickness = new Thickness(1),
-            CornerRadius = new CornerRadius(7)
+            Background = darkMode ? Brush("#D91B222B") : Brush("#F2FFFFFF"),
+            BorderThickness = new Thickness(0),
+            CornerRadius = new CornerRadius(4)
         };
         frame.ToolTip = "点击或拖动取景框以定位；适应窗口时会按当前适应比例切换到 100% 或 200%";
 
@@ -998,7 +1055,7 @@ internal sealed class MainWindow : Window
             UpdateFilmStripSelection();
             QueueVisibleFilmThumbnailLoads();
         };
-        return new Border { Child = filmStripScrollViewer, Padding = new Thickness(3, 2, 3, 2), Background = Brush("#202833"), BorderBrush = Brush("#3F4B58"), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(6), MaxWidth = 460 };
+        return new Border { Child = filmStripScrollViewer, Padding = new Thickness(3, 2, 3, 2), Background = Brush("#D9202833"), BorderThickness = new Thickness(0), CornerRadius = new CornerRadius(4), MaxWidth = 460 };
     }
 
     private void UpdateFilmStripSelection()
