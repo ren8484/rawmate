@@ -335,6 +335,7 @@ internal sealed class MainWindow : Window
         folderRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(42) });
         folderBox.Height = 40;
         folderBox.FontSize = 15;
+        folderBox.FontWeight = FontWeights.Normal;
         folderBox.Padding = new Thickness(10, 0, 10, 0);
         folderBox.VerticalContentAlignment = VerticalAlignment.Center;
         folderBox.BorderThickness = new Thickness(0);
@@ -361,8 +362,9 @@ internal sealed class MainWindow : Window
             ClipToBounds = true
         });
         folderHint.Margin = new Thickness(2, 6, 2, 0);
-        folderHint.FontSize = 12;
-        folderHint.Foreground = Brush("#6A7787");
+        folderHint.FontSize = 11;
+        folderHint.FontWeight = FontWeights.Normal;
+        folderHint.Foreground = Brush("#8F9CAA");
         folderHint.Text = "选择照片主目录";
         folderHint.TextWrapping = TextWrapping.Wrap;
         panel.Children.Add(folderHint);
@@ -511,6 +513,7 @@ internal sealed class MainWindow : Window
             {
                 Text = shortcut,
                 FontSize = 10,
+                FontWeight = FontWeights.SemiBold,
                 Foreground = Brush(color),
                 HorizontalAlignment = HorizontalAlignment.Center,
                 VerticalAlignment = VerticalAlignment.Center,
@@ -518,6 +521,7 @@ internal sealed class MainWindow : Window
             }
         });
         block.FontSize = 12;
+        block.FontWeight = FontWeights.Normal;
         block.VerticalAlignment = VerticalAlignment.Center;
         block.Margin = new Thickness(7, 0, 0, 0);
         SetProgressOutcomeText(block, label, color, 0);
@@ -529,8 +533,8 @@ internal sealed class MainWindow : Window
     private static void SetProgressOutcomeText(TextBlock block, string label, string color, int count)
     {
         block.Inlines.Clear();
-        block.Inlines.Add(new Run(label + "  ") { Foreground = Brush("#B5C0CD") });
-        block.Inlines.Add(new Run(count.ToString("N0")) { Foreground = Brush(color), FontSize = 12 });
+        block.Inlines.Add(new Run(label + "  ") { Foreground = Brush("#B5C0CD"), FontWeight = FontWeights.Normal });
+        block.Inlines.Add(new Run(count.ToString("N0")) { Foreground = Brush(color), FontSize = 12, FontWeight = FontWeights.SemiBold });
     }
 
     private void UpdateCullProgress()
@@ -2877,6 +2881,7 @@ internal sealed class MainWindow : Window
         {
             Text = label,
             FontSize = 13,
+            FontWeight = FontWeights.Normal,
             Foreground = Brush("#6A7787"),
             HorizontalAlignment = HorizontalAlignment.Stretch,
             TextAlignment = TextAlignment.Center
