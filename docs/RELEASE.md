@@ -16,14 +16,15 @@
 
 1. 运行 `BUILD_RAWMate.cmd`。
 2. 确认只生成正式 `RAWMate.exe`，图标正确。
-3. 计算 SHA-256：
+3. 确认 `RAWMateHeader.png` 已作为资源嵌入 EXE，并在没有旁置 PNG 的目录中完成启动检查。
+4. 计算 SHA-256：
 
 ```powershell
 Get-FileHash .\RAWMate.exe -Algorithm SHA256
 ```
 
-4. 再做一次启动和核心流程冒烟测试。
-5. 更新 `CHANGELOG.md`，提交源码和文档。
+5. 再做一次启动和核心流程冒烟测试。
+6. 更新 `CHANGELOG.md`，提交源码和文档。
 
 ## 3. 桌面快捷方式
 
@@ -39,11 +40,11 @@ Get-FileHash .\RAWMate.exe -Algorithm SHA256
 - 普通 PR 的 CI artifact 是测试构建，不代表正式发布。
 - 正式发布使用带版本标签的 GitHub Release，并附：
   - `RAWMate.exe`
-  - `RAWMateHeader.png`
   - SHA-256
   - 变更摘要
   - 支持的 Windows/运行要求
   - 已知限制
+- Release 只分发单个正式 `RAWMate.exe`；不上传压缩包、测试版、测试快捷方式或旁置图片。
 - 发布后保证 `README.md`、`CHANGELOG.md`、`PROJECT_CONTEXT.md` 与代码一致。
 
 ## 5. 回滚
@@ -54,4 +55,3 @@ Get-FileHash .\RAWMate.exe -Algorithm SHA256
 2. 指向上一正式 Release。
 3. 从上一标签重新构建，不从来历不明的本地 EXE 回滚。
 4. 新建 Issue 记录复现、影响和修复验证。
-

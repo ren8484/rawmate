@@ -23,7 +23,7 @@ jobs:
           if (-not (Test-Path -LiteralPath $compiler)) {
             throw "Cannot find .NET Framework compiler: $compiler"
           }
-          & $compiler /nologo /target:winexe /optimize+ /out:RAWMate-Test.exe /win32icon:RAWMate.ico RAWMate.cs "/reference:$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\WPF\WindowsBase.dll" "/reference:$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\WPF\PresentationCore.dll" "/reference:$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\WPF\PresentationFramework.dll" "/reference:$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\System.Xaml.dll" /reference:System.Windows.Forms.dll
+          & $compiler /nologo /target:winexe /optimize+ /out:RAWMate-Test.exe /win32icon:RAWMate.ico /resource:RAWMateHeader.png,RAWMateHeader.png RAWMate.cs "/reference:$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\WPF\WindowsBase.dll" "/reference:$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\WPF\PresentationCore.dll" "/reference:$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\WPF\PresentationFramework.dll" "/reference:$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\System.Xaml.dll" /reference:System.Windows.Forms.dll
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Get-FileHash .\RAWMate-Test.exe -Algorithm SHA256
 
@@ -31,8 +31,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: RAWMate-Test
-          path: |
-            RAWMate-Test.exe
-            RAWMateHeader.png
+          path: RAWMate-Test.exe
           if-no-files-found: error
-

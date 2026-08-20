@@ -86,7 +86,7 @@ $shortcut.Save()
 ## 4. 首次远程核验
 
 1. Actions 中 `Windows test build` 成功。
-2. Workflow artifact 包含 `RAWMate-Test.exe` 和 `RAWMateHeader.png`。
+2. Workflow artifact 只包含 `RAWMate-Test.exe`；界面徽标已经嵌入 EXE，不需要旁置 `RAWMateHeader.png`。
 3. Issue 页面可选择 Bug/Feature 模板。
 4. 新建 PR 时自动出现测试和安全清单。
 5. 仓库文件列表中没有 EXE、日志、照片或本机状态文件。

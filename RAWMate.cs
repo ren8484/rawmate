@@ -27,9 +27,9 @@ using Forms = System.Windows.Forms;
 [assembly: AssemblyCompany("ren8484")]
 [assembly: AssemblyProduct("RAWMate")]
 [assembly: AssemblyCopyright("Copyright © 2026 ren8484")]
-[assembly: AssemblyVersion("1.2.1.0")]
-[assembly: AssemblyFileVersion("1.2.1.0")]
-[assembly: AssemblyInformationalVersion("1.2.1")]
+[assembly: AssemblyVersion("1.2.2.0")]
+[assembly: AssemblyFileVersion("1.2.2.0")]
+[assembly: AssemblyInformationalVersion("1.2.2")]
 
 internal static class Program
 {
@@ -613,13 +613,17 @@ internal sealed class MainWindow : Window
         var panel = new Grid();
         panel.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         panel.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
-        var header = new Grid();
+        var header = new Grid { ClipToBounds = true };
         header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         header.Children.Add(SectionTitle("单张视图"));
-        singleCaption.HorizontalAlignment = HorizontalAlignment.Center;
+        singleCaption.HorizontalAlignment = HorizontalAlignment.Stretch;
         singleCaption.VerticalAlignment = VerticalAlignment.Center;
+        singleCaption.TextAlignment = TextAlignment.Center;
+        singleCaption.TextWrapping = TextWrapping.NoWrap;
+        singleCaption.TextTrimming = TextTrimming.CharacterEllipsis;
+        singleCaption.Margin = new Thickness(12, 0, 12, 0);
         singleCaption.Foreground = Brush("#66778B");
         singleCaption.FontSize = 13;
         Grid.SetColumn(singleCaption, 1);
@@ -1882,7 +1886,19 @@ internal sealed class MainWindow : Window
             previewGrid.Children.Add(badge);
         }
         stack.Children.Add(previewGrid);
-        stack.Children.Add(new TextBlock { Text = Path.GetFileName(file), Margin = new Thickness(1, 7, 1, 0), TextTrimming = TextTrimming.CharacterEllipsis, ToolTip = Path.GetFileName(file), FontSize = 12, Foreground = Brush("#2D3A4A") });
+        var fileName = Path.GetFileName(file);
+        stack.Children.Add(new TextBlock
+        {
+            Text = fileName,
+            Margin = new Thickness(1, 7, 1, 0),
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            TextAlignment = TextAlignment.Center,
+            TextWrapping = TextWrapping.NoWrap,
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            ToolTip = fileName,
+            FontSize = 12,
+            Foreground = Brush("#2D3A4A")
+        });
         tile.Child = stack;
         tileFiles.Add(tile, file);
         tile.MouseLeftButtonDown += TileMouseDown;
@@ -2253,6 +2269,7 @@ internal sealed class MainWindow : Window
         var targetImage = singleImage;
         var version = ++singleLoadVersion;
         singleCaption.Text = Path.GetFileName(file);
+        singleCaption.ToolTip = singleCaption.Text;
         singleViewer.ContextMenu = BuildTileMenu(file);
         targetImage.Source = null;
         navigatorImage.Source = null;
@@ -2814,9 +2831,22 @@ internal sealed class MainWindow : Window
         double seconds;
         uint numerator, denominator;
         if (!TryGetRational(value, out seconds, out numerator, out denominator) || seconds <= 0) return "—";
-        if (seconds < 1 && numerator > 0 && denominator > 0) return numerator + "/" + denominator + " 秒";
-        if (seconds < 1) return "1/" + Math.Round(1 / seconds).ToString(CultureInfo.InvariantCulture) + " 秒";
-        return seconds.ToString(seconds % 1 == 0 ? "0" : "0.##", CultureInfo.InvariantCulture) + " 秒";
+        return FormatExposureSeconds(seconds);
+    }
+
+    private static string FormatExposureSeconds(double seconds)
+    {
+        if (seconds <= 0 || Double.IsNaN(seconds) || Double.IsInfinity(seconds)) return "—";
+        if (seconds < 1)
+        {
+            var reciprocal = 1.0 / seconds;
+            if (!Double.IsNaN(reciprocal) && !Double.IsInfinity(reciprocal) && reciprocal <= Int64.MaxValue)
+            {
+                var nearestDenominator = (long)Math.Round(reciprocal, MidpointRounding.AwayFromZero);
+                if (nearestDenominator >= 2) return "1/" + nearestDenominator.ToString(CultureInfo.InvariantCulture) + " 秒";
+            }
+        }
+        return seconds.ToString(seconds % 1 == 0 ? "0" : "0.###", CultureInfo.InvariantCulture) + " 秒";
     }
 
     private void SetStatus(string text, bool error)
@@ -3075,7 +3105,20 @@ internal sealed class MainWindow : Window
     {
         try
         {
-            var image = new BitmapImage(new Uri(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "RAWMateHeader.png"), UriKind.Absolute));
+            var assembly = Assembly.GetExecutingAssembly();
+            var stream = assembly.GetManifestResourceStream("RAWMateHeader.png");
+            if (stream == null)
+                throw new FileNotFoundException("Embedded header image was not found.");
+
+            var image = new BitmapImage();
+            using (stream)
+            {
+                image.BeginInit();
+                image.CacheOption = BitmapCacheOption.OnLoad;
+                image.StreamSource = stream;
+                image.EndInit();
+            }
+            image.Freeze();
             return new Image { Source = image, Stretch = Stretch.Uniform };
         }
         catch
