@@ -27,9 +27,9 @@ using Forms = System.Windows.Forms;
 [assembly: AssemblyCompany("ren8484")]
 [assembly: AssemblyProduct("RAWMate")]
 [assembly: AssemblyCopyright("Copyright © 2026 ren8484")]
-[assembly: AssemblyVersion("1.2.2.0")]
-[assembly: AssemblyFileVersion("1.2.2.0")]
-[assembly: AssemblyInformationalVersion("1.2.2")]
+[assembly: AssemblyVersion("1.3.0.0")]
+[assembly: AssemblyFileVersion("1.3.0.0")]
+[assembly: AssemblyInformationalVersion("1.3.0")]
 
 internal static class Program
 {
@@ -78,7 +78,6 @@ internal sealed class MainWindow : Window
     private Button recycleSelectedButton = new Button();
     private Button recycleRejectedButton = new Button();
     private Button filterButton = new Button();
-    private Button autoAdvanceButton = new Button();
     private Image singleImage = new Image();
     private ScrollViewer singleViewer = new ScrollViewer();
     private TextBlock singleCaption = new TextBlock();
@@ -128,7 +127,6 @@ internal sealed class MainWindow : Window
     private string lastFolder;
     private string gallerySortMode = "name_asc";
     private double gridTileWidth = 196;
-    private bool autoAdvanceEnabled;
     private static readonly bool darkMode = true;
     private const double DefaultWindowWidth = 1380;
     private const double DefaultWindowHeight = 860;
@@ -578,7 +576,6 @@ internal sealed class MainWindow : Window
         topRight.Children.Add(BuildFilterButton());
         topRight.Children.Add(BuildSortButton());
         topRight.Children.Add(BuildThumbnailSizeButton());
-        topRight.Children.Add(BuildAutoAdvanceButton());
         topRight.Children.Add(BuildViewButton(true));
         topRight.Children.Add(BuildViewButton(false));
         Grid.SetColumn(topRight, 1);
@@ -633,7 +630,6 @@ internal sealed class MainWindow : Window
         Grid.SetColumn(singleCaption, 1);
         header.Children.Add(singleCaption);
         var topRight = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-        topRight.Children.Add(BuildAutoAdvanceButton());
         topRight.Children.Add(BuildViewButton(true));
         topRight.Children.Add(BuildViewButton(false));
         Grid.SetColumn(topRight, 2);
@@ -948,44 +944,6 @@ internal sealed class MainWindow : Window
             menu.IsOpen = true;
         };
         return button;
-    }
-
-    private Button BuildAutoAdvanceButton()
-    {
-        autoAdvanceButton = new Button
-        {
-            Width = 88,
-            Height = 28,
-            FontSize = 11,
-            FontWeight = FontWeights.SemiBold,
-            Margin = new Thickness(8, 0, 0, 0),
-            Padding = new Thickness(0),
-            Cursor = Cursors.Hand,
-            BorderThickness = new Thickness(1),
-            ToolTip = "Caps Lock 切换自动前进"
-        };
-        UpdateAutoAdvanceButtonAppearance();
-        autoAdvanceButton.Click += delegate { ToggleAutoAdvance(); };
-        return autoAdvanceButton;
-    }
-
-    private void UpdateAutoAdvanceButtonAppearance()
-    {
-        if (autoAdvanceButton == null) return;
-        autoAdvanceButton.Content = autoAdvanceEnabled ? "自动前进 开" : "自动前进 关";
-        autoAdvanceButton.Background = Brush(ButtonBlue);
-        autoAdvanceButton.BorderBrush = autoAdvanceEnabled ? Brush("#A9C7E8") : Brush(ButtonBlue);
-        autoAdvanceButton.Foreground = Brushes.White;
-        autoAdvanceButton.Opacity = autoAdvanceEnabled ? 1.0 : 0.82;
-        ApplyRoundedButtonTemplate(autoAdvanceButton, 7);
-    }
-
-    private void ToggleAutoAdvance()
-    {
-        autoAdvanceEnabled = !autoAdvanceEnabled;
-        SaveSettings();
-        UpdateAutoAdvanceButtonAppearance();
-        SetStatus("自动前进已" + (autoAdvanceEnabled ? "开启" : "关闭") + "。Caps Lock 可随时切换。", false);
     }
 
     private void AddThumbnailSizeMenuItem(ContextMenu menu, string text, double width)
@@ -1423,8 +1381,6 @@ internal sealed class MainWindow : Window
                     gallerySortMode = NormalizeSortMode(line.Substring(5));
                 else if (line.StartsWith("filter=", StringComparison.OrdinalIgnoreCase))
                     activeFilter = NormalizeFilter(line.Substring(7));
-                else if (line.StartsWith("auto_advance=", StringComparison.OrdinalIgnoreCase))
-                    autoAdvanceEnabled = String.Equals(line.Substring(13), "true", StringComparison.OrdinalIgnoreCase);
                 else if (line.StartsWith("folder=", StringComparison.OrdinalIgnoreCase))
                 {
                     var folder = line.Substring(7);
@@ -1453,7 +1409,6 @@ internal sealed class MainWindow : Window
             lines.Add("grid_tile_width=" + gridTileWidth.ToString("0", CultureInfo.InvariantCulture));
             lines.Add("sort=" + gallerySortMode);
             lines.Add("filter=" + activeFilter);
-            lines.Add("auto_advance=" + (autoAdvanceEnabled ? "true" : "false"));
             if (!forgetFolderHistoryUntilNextScan)
                 lines.AddRange(recentFolders.Take(3).Select(folder => "folder=" + folder));
             File.WriteAllLines(settingsPath, lines);
@@ -1791,7 +1746,7 @@ internal sealed class MainWindow : Window
         foreach (var jpg in visibleJpgs) gallery.Children.Add(CreateTile(jpg));
         QueueVisibleThumbnailLoads();
         galleryCaption.Text = "筛选：" + FilterLabel() + " · " + visibleJpgs.Count + "/" + jpgs.Count + " 张 · 单击选择，双击单张浏览";
-        SetStatus("快捷键：P 标记保留 · X / Delete 标记废片\n← / → 切换照片 · 空格切换单张与网格视图", false);
+        SetStatus("快捷键：P 保留 · X / Delete 废片，标记后自动前进\n← / → 切换照片 · 空格切换单张与网格视图", false);
     }
 
     private bool MatchesFilter(string file)
@@ -2083,12 +2038,6 @@ internal sealed class MainWindow : Window
 
     private void MainWindowPreviewKeyDown(object sender, KeyEventArgs e)
     {
-        if (e.Key == Key.CapsLock)
-        {
-            if (!e.IsRepeat) ToggleAutoAdvance();
-            e.Handled = true;
-            return;
-        }
         if (Keyboard.FocusedElement is TextBox || Keyboard.FocusedElement is PasswordBox || Keyboard.FocusedElement is ComboBox) return;
         if (e.Key == Key.Left)
         {
@@ -2112,15 +2061,13 @@ internal sealed class MainWindow : Window
         if (String.IsNullOrWhiteSpace(active)) return;
         if (e.Key == Key.P)
         {
-            var next = NextPhotoForAutoAdvance(active);
-            TogglePick(active, next, autoAdvanceEnabled);
+            TogglePick(active, true);
             e.Handled = true;
             return;
         }
         if (e.Key == Key.X || e.Key == Key.Delete)
         {
-            var next = NextPhotoForAutoAdvance(active);
-            ToggleReject(active, next, autoAdvanceEnabled);
+            ToggleReject(active, true);
             e.Handled = true;
             return;
         }
@@ -2132,16 +2079,22 @@ internal sealed class MainWindow : Window
         if (!String.IsNullOrWhiteSpace(currentSingleFile) && selectedFiles.Contains(currentSingleFile)) return currentSingleFile;
         var selected = selectedFiles.FirstOrDefault();
         if (!String.IsNullOrWhiteSpace(selected)) return selected;
-        return galleryFiles.FirstOrDefault();
+        return galleryFiles.FirstOrDefault(MatchesFilter);
     }
 
-    private string NextPhotoForAutoAdvance(string active)
+    private string NextUndecidedPhoto(string active)
     {
-        if (!autoAdvanceEnabled || String.IsNullOrWhiteSpace(active)) return null;
+        if (String.IsNullOrWhiteSpace(active)) return null;
         EnsureGalleryFiles();
-        var sequence = singleViewMode ? galleryFiles.ToList() : galleryFiles.Where(MatchesFilter).ToList();
-        var index = sequence.FindIndex(item => String.Equals(item, active, StringComparison.OrdinalIgnoreCase));
-        return index >= 0 && index + 1 < sequence.Count ? sequence[index + 1] : null;
+        if (galleryFiles.Count == 0) return null;
+        var index = galleryFiles.FindIndex(item => String.Equals(item, active, StringComparison.OrdinalIgnoreCase));
+        for (var offset = 1; offset <= galleryFiles.Count; offset++)
+        {
+            var candidate = galleryFiles[(index + offset + galleryFiles.Count) % galleryFiles.Count];
+            if (!pickedFiles.Contains(candidate) && !rejectedFiles.Contains(candidate) && File.Exists(candidate))
+                return candidate;
+        }
+        return null;
     }
 
     private void SelectRelativeInGrid(int direction)
@@ -2162,34 +2115,70 @@ internal sealed class MainWindow : Window
         recycleSelectedButton.Opacity = 1.0;
     }
 
-    private void TogglePick(string file, string nextFile = null, bool advanceRequested = false)
+    private void TogglePick(string file, bool advanceRequested = false)
     {
-        if (pickedFiles.Contains(file)) pickedFiles.Remove(file);
+        var becameUndecided = pickedFiles.Contains(file);
+        if (becameUndecided) pickedFiles.Remove(file);
         else { pickedFiles.Add(file); rejectedFiles.Remove(file); }
         SaveCullMarks();
-        ApplyCullChange(file, "保留旗标已更新。", nextFile, advanceRequested);
+        ApplyCullChange(file, "保留旗标已更新。", advanceRequested, becameUndecided);
     }
 
-    private void ToggleReject(string file, string nextFile = null, bool advanceRequested = false)
+    private void ToggleReject(string file, bool advanceRequested = false)
     {
-        if (rejectedFiles.Contains(file)) rejectedFiles.Remove(file);
+        var becameUndecided = rejectedFiles.Contains(file);
+        if (becameUndecided) rejectedFiles.Remove(file);
         else { rejectedFiles.Add(file); pickedFiles.Remove(file); }
         SaveCullMarks();
-        ApplyCullChange(file, "废片旗标已更新。可点击“移除所有废片”统一清理。", nextFile, advanceRequested);
+        ApplyCullChange(file, "废片旗标已更新。可点击“移除所有废片”统一清理。", advanceRequested, becameUndecided);
     }
 
-    private void ApplyCullChange(string file, string message, string nextFile, bool advanceRequested)
+    private void ApplyCullChange(string file, string message, bool advanceRequested, bool becameUndecided)
     {
-        var advanced = advanceRequested && !String.IsNullOrWhiteSpace(nextFile) && File.Exists(nextFile);
-        currentSingleFile = advanced ? nextFile : file;
+        EnsureGalleryFiles();
+        var cullingFilter = activeFilter == "all" || activeFilter == "undecided";
+        var shouldAdvance = advanceRequested && !becameUndecided && cullingFilter;
+        var nextFile = shouldAdvance ? NextUndecidedPhoto(file) : null;
+        var completed = shouldAdvance && galleryFiles.Count > 0 && String.IsNullOrWhiteSpace(nextFile)
+                     && galleryFiles.All(item => pickedFiles.Contains(item) || rejectedFiles.Contains(item));
+        var targetFile = file;
+        var advanceMessage = String.Empty;
+
+        if (becameUndecided)
+            advanceMessage = " 当前照片已取消旗标并回到未决定。";
+        else if (shouldAdvance && !completed)
+        {
+            if (!String.IsNullOrWhiteSpace(nextFile) && File.Exists(nextFile))
+            {
+                targetFile = nextFile;
+                advanceMessage = " 已跳到下一张未决定的照片。";
+            }
+        }
+        else if (advanceRequested && !cullingFilter)
+            advanceMessage = " 当前为复查筛选，仅刷新旗标结果。";
+
+        currentSingleFile = targetFile;
         if (singleViewMode)
         {
             RebuildUi();
             ShowPhotoInfo(currentSingleFile);
         }
         else RebuildUi();
-        if (advanceRequested)
-            message += advanced ? " 已自动前进到下一张。" : " 已到当前序列最后一张。";
+        if (completed)
+        {
+            var picked = galleryFiles.Count(pickedFiles.Contains);
+            var rejected = galleryFiles.Count(rejectedFiles.Contains);
+            var total = galleryFiles.Count;
+            message = "所有照片均已完成去留标记。";
+            SetStatus(message, false);
+            MessageBox.Show(
+                "已决定 " + total.ToString("N0") + " / " + total.ToString("N0") + "\n" +
+                "保留 " + picked.ToString("N0") + "\n" +
+                "废片 " + rejected.ToString("N0"),
+                "挑片完成", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        else message += advanceMessage;
         SetStatus(message, false);
     }
 
