@@ -27,9 +27,9 @@ using Forms = System.Windows.Forms;
 [assembly: AssemblyCompany("ren8484")]
 [assembly: AssemblyProduct("RAWMate")]
 [assembly: AssemblyCopyright("Copyright © 2026 ren8484")]
-[assembly: AssemblyVersion("1.3.0.0")]
-[assembly: AssemblyFileVersion("1.3.0.0")]
-[assembly: AssemblyInformationalVersion("1.3.0")]
+[assembly: AssemblyVersion("1.3.1.0")]
+[assembly: AssemblyFileVersion("1.3.1.0")]
+[assembly: AssemblyInformationalVersion("1.3.1")]
 
 internal static class Program
 {
@@ -81,6 +81,9 @@ internal sealed class MainWindow : Window
     private Image singleImage = new Image();
     private ScrollViewer singleViewer = new ScrollViewer();
     private TextBlock singleCaption = new TextBlock();
+    private Border singleCullBadge = new Border();
+    private TextBlock singleCullBadgeText = new TextBlock();
+    private Button advanceTargetButton = new Button();
     private TextBox zoomBox = new TextBox();
     private Canvas navigatorCanvas = new Canvas();
     private Image navigatorImage = new Image();
@@ -102,6 +105,8 @@ internal sealed class MainWindow : Window
     private Border selectionAnchor;
     private string currentSingleFile;
     private bool singleViewMode;
+    private bool advanceToUndecided = true;
+    private bool buildingInitialShell;
     private bool fitSingleImage = true;
     private double singleZoom = 1.0;
     private Point singlePanStart;
@@ -117,6 +122,10 @@ internal sealed class MainWindow : Window
     private readonly Dictionary<string, BitmapSource> fullImageCache = new Dictionary<string, BitmapSource>(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, Task<BitmapSource>> fullImageLoadTasks = new Dictionary<string, Task<BitmapSource>>(StringComparer.OrdinalIgnoreCase);
     private readonly LinkedList<string> fullImageCacheLru = new LinkedList<string>();
+    private readonly object thumbnailCacheLock = new object();
+    private readonly Dictionary<string, Tuple<int, BitmapSource>> thumbnailCache = new Dictionary<string, Tuple<int, BitmapSource>>(StringComparer.OrdinalIgnoreCase);
+    private readonly LinkedList<string> thumbnailCacheLru = new LinkedList<string>();
+    private readonly object captureDateCacheLock = new object();
     private readonly Dictionary<string, DateTime?> captureDateCache = new Dictionary<string, DateTime?>(StringComparer.OrdinalIgnoreCase);
     private int fullImageCacheGeneration;
     private readonly List<string> recentFolders = new List<string>();
@@ -133,9 +142,12 @@ internal sealed class MainWindow : Window
     private const double PreferredMinimumWindowWidth = 1000;
     private const double PreferredMinimumWindowHeight = 640;
     private const double SidebarWidth = 320;
+    private const int MaxThumbnailCacheItems = 512;
     // The sidebar column also contains outer margins, border and padding; 280 DIPs
     // matches the original usable content width so large screens are not rescaled.
     private const double SidebarContentWidth = 280;
+    private const double HeaderControlHeight = 28;
+    private const double HeaderControlGap = 8;
     private const string ButtonBlue = "#436794";
     private const int DwmUseImmersiveDarkModeBefore20H1 = 19;
     private const int DwmUseImmersiveDarkMode = 20;
@@ -160,7 +172,12 @@ internal sealed class MainWindow : Window
         UseLayoutRounding = true;
         SnapsToDevicePixels = true;
         try { Icon = BitmapFrame.Create(new Uri(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "RAWMate.ico"), UriKind.Absolute)); } catch { }
+        // Always paint a lightweight shell first. Restoring a saved single-photo
+        // session can require directory sorting and EXIF reads, so defer that work
+        // until after the window has become visible.
+        buildingInitialShell = true;
         Content = BuildUi();
+        buildingInitialShell = false;
         SetStatus("选择一个相机照片目录，然后扫描或创建分类。", false);
         PreviewKeyDown += MainWindowPreviewKeyDown;
         Loaded += delegate
@@ -552,11 +569,20 @@ internal sealed class MainWindow : Window
         SetProgressOutcomeText(rejectedProgressCount, "废片", "#F0667A", rejected);
         cullProgressFillColumn.Width = new GridLength(total > 0 ? decided : 0, GridUnitType.Star);
         cullProgressRemainingColumn.Width = new GridLength(total > 0 ? total - decided : 1, GridUnitType.Star);
+        UpdateRejectedButtonState();
+    }
+
+    private void UpdateRejectedButtonState()
+    {
+        if (recycleRejectedButton == null) return;
+        var enabled = rejectedFiles.Count > 0;
+        recycleRejectedButton.IsHitTestVisible = enabled;
+        recycleRejectedButton.Opacity = enabled ? 1.0 : 0.52;
     }
 
     private UIElement BuildGalleryCard()
     {
-        return singleViewMode ? BuildSingleView() : BuildGridView();
+        return singleViewMode && !buildingInitialShell ? BuildSingleView() : BuildGridView();
     }
 
     private UIElement BuildGridView()
@@ -630,6 +656,8 @@ internal sealed class MainWindow : Window
         Grid.SetColumn(singleCaption, 1);
         header.Children.Add(singleCaption);
         var topRight = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+        topRight.Children.Add(BuildSingleCullBadge());
+        topRight.Children.Add(BuildAdvanceTargetButton());
         topRight.Children.Add(BuildViewButton(true));
         topRight.Children.Add(BuildViewButton(false));
         Grid.SetColumn(topRight, 2);
@@ -657,7 +685,7 @@ internal sealed class MainWindow : Window
         stage.Children.Add(stripFrame);
         var controlsFrame = new Border { HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Bottom, Margin = new Thickness(0, 0, 0, 80), Padding = new Thickness(5, 4, 5, 4), Background = Brush("#E6202833"), BorderThickness = new Thickness(0), CornerRadius = new CornerRadius(5) };
         var controls = new StackPanel { Orientation = Orientation.Horizontal };
-        var previous = SingleToolButton("‹", 30, "上一张");
+        var previous = SingleToolButton("‹", 30, "上一张（由挑片 / 浏览模式决定）");
         previous.Margin = new Thickness(0, 0, 4, 0);
         previous.Click += delegate { NavigateSingle(-1); };
         controls.Children.Add(previous);
@@ -688,7 +716,7 @@ internal sealed class MainWindow : Window
         zoomIn.Margin = new Thickness(0, 0, 4, 0);
         zoomIn.Click += delegate { ChangeSingleZoom(1.25); };
         controls.Children.Add(zoomIn);
-        var next = SingleToolButton("›", 30, "下一张");
+        var next = SingleToolButton("›", 30, "下一张（由挑片 / 浏览模式决定）");
         next.Click += delegate { NavigateSingle(1); };
         controls.Children.Add(next);
         controlsFrame.Child = controls;
@@ -698,6 +726,89 @@ internal sealed class MainWindow : Window
         panel.Children.Add(frame);
         LoadSinglePhoto();
         return panel;
+    }
+
+    private Border BuildSingleCullBadge()
+    {
+        singleCullBadge = new Border
+        {
+            HorizontalAlignment = HorizontalAlignment.Right,
+            VerticalAlignment = VerticalAlignment.Center,
+            Height = HeaderControlHeight,
+            MinWidth = 58,
+            Margin = new Thickness(0),
+            Padding = new Thickness(8, 0, 8, 0),
+            CornerRadius = new CornerRadius(4),
+            BorderThickness = new Thickness(1),
+            IsHitTestVisible = false
+        };
+        singleCullBadgeText = new TextBlock
+        {
+            FontSize = 12,
+            FontWeight = FontWeights.SemiBold,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        singleCullBadge.Child = singleCullBadgeText;
+        UpdateSingleCullStatus();
+        return singleCullBadge;
+    }
+
+    private Button BuildAdvanceTargetButton()
+    {
+        advanceTargetButton = SecondaryButton(String.Empty, 56);
+        advanceTargetButton.Height = HeaderControlHeight;
+        advanceTargetButton.Margin = new Thickness(HeaderControlGap, 0, 0, 0);
+        advanceTargetButton.Padding = new Thickness(0);
+        advanceTargetButton.FontSize = 12;
+        UpdateAdvanceTargetButton();
+        advanceTargetButton.Click += delegate
+        {
+            advanceToUndecided = !advanceToUndecided;
+            UpdateAdvanceTargetButton();
+            SaveSettings();
+            SetStatus(advanceToUndecided
+                ? "自动前进方式：跳到下一张未决定照片。"
+                : "自动前进方式：按当前排序跳到下一张照片。", false);
+        };
+        return advanceTargetButton;
+    }
+
+    private void UpdateAdvanceTargetButton()
+    {
+        if (advanceTargetButton == null) return;
+        advanceTargetButton.Content = advanceToUndecided ? "挑片" : "浏览";
+        advanceTargetButton.ToolTip = advanceToUndecided
+            ? "挑片：前后导航只访问未决定照片，标记后跳到下一张未决定照片"
+            : "浏览：前后导航和标记后前进均按当前排序逐张进行";
+    }
+
+    private void UpdateSingleCullStatus()
+    {
+        if (singleCullBadge == null || singleCullBadgeText == null) return;
+        if (!String.IsNullOrWhiteSpace(currentSingleFile) && pickedFiles.Contains(currentSingleFile))
+        {
+            singleCullBadgeText.Text = "P  保留";
+            singleCullBadgeText.Foreground = Brush("#65E27A");
+            singleCullBadge.Background = Brush("#E6213328");
+            singleCullBadge.BorderBrush = Brush("#7258D26E");
+            singleCullBadge.ToolTip = "当前照片状态：保留";
+        }
+        else if (!String.IsNullOrWhiteSpace(currentSingleFile) && rejectedFiles.Contains(currentSingleFile))
+        {
+            singleCullBadgeText.Text = "X  废片";
+            singleCullBadgeText.Foreground = Brush("#FF7084");
+            singleCullBadge.Background = Brush("#E63B252C");
+            singleCullBadge.BorderBrush = Brush("#72F0667A");
+            singleCullBadge.ToolTip = "当前照片状态：废片";
+        }
+        else
+        {
+            singleCullBadgeText.Text = "未决定";
+            singleCullBadgeText.Foreground = Brush("#B7C4D2");
+            singleCullBadge.Background = Brush("#E6252D36");
+            singleCullBadge.BorderBrush = Brush("#725B6979");
+            singleCullBadge.ToolTip = "当前照片状态：未决定";
+        }
     }
 
     private UIElement BuildNavigator()
@@ -1007,8 +1118,15 @@ internal sealed class MainWindow : Window
         foreach (var file in galleryFiles)
         {
             var tile = new Border { Width = 62, Height = 48, Margin = new Thickness(2, 0, 2, 0), Background = Brush("#151A20"), BorderBrush = Brush("#3F4955"), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(4), ClipToBounds = true, Cursor = Cursors.Hand, ToolTip = Path.GetFileName(file) };
-            tile.Child = new TextBlock { Text = "…", Foreground = Brush("#75869A"), HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
-            lazyFilmThumbnailFiles[tile] = file;
+            BitmapSource cachedThumbnail;
+            int cachedWidth;
+            if (TryGetAnyCachedThumbnail(file, out cachedThumbnail, out cachedWidth))
+                tile.Child = CreateThumbnailImage(cachedThumbnail);
+            else
+            {
+                tile.Child = new TextBlock { Text = "…", Foreground = Brush("#75869A"), HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
+                lazyFilmThumbnailFiles[tile] = file;
+            }
             tile.MouseLeftButtonDown += delegate { currentSingleFile = file; ShowPhotoInfo(file); LoadSinglePhoto(); UpdateFilmStripSelection(); };
             filmTiles[tile] = file;
             filmStrip.Children.Add(tile);
@@ -1060,7 +1178,7 @@ internal sealed class MainWindow : Window
             if (tile.Child is Image || loadingFilmThumbnailTiles.Contains(tile) || !IsFilmThumbnailNearViewport(tile)) continue;
             loadingFilmThumbnailTiles.Add(tile);
             var file = item.Value;
-            Task.Factory.StartNew(delegate { return LoadOrientedJpeg(file, 110); }).ContinueWith(delegate(Task<BitmapSource> task)
+            Task.Factory.StartNew(delegate { return LoadCachedThumbnail(file, 110); }).ContinueWith(delegate(Task<BitmapSource> task)
             {
                 Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(delegate
                 {
@@ -1070,15 +1188,7 @@ internal sealed class MainWindow : Window
                         !String.Equals(expected, file, StringComparison.OrdinalIgnoreCase)) return;
                     if (task.Status == TaskStatus.RanToCompletion)
                     {
-                        var image = new Image
-                        {
-                            Source = task.Result,
-                            Stretch = Stretch.Uniform,
-                            HorizontalAlignment = HorizontalAlignment.Center,
-                            VerticalAlignment = VerticalAlignment.Center
-                        };
-                        RenderOptions.SetBitmapScalingMode(image, BitmapScalingMode.HighQuality);
-                        tile.Child = image;
+                        tile.Child = CreateThumbnailImage(task.Result);
                     }
                     else
                     {
@@ -1105,9 +1215,9 @@ internal sealed class MainWindow : Window
     private Button BuildViewButton(bool gridView)
     {
         var active = singleViewMode != gridView;
-        var button = new Button { Content = gridView ? "▦" : "▣", ToolTip = gridView ? "网格视图" : "单张视图", Margin = new Thickness(8, 0, 0, 0) };
+        var button = new Button { Content = gridView ? "▦" : "▣", ToolTip = gridView ? "网格视图" : "单张视图", Margin = new Thickness(HeaderControlGap, 0, 0, 0) };
         button.Width = 32;
-        button.Height = 28;
+        button.Height = HeaderControlHeight;
         button.FontSize = 18;
         button.Padding = new Thickness(0, -2, 0, 0);
         button.Cursor = Cursors.Hand;
@@ -1208,8 +1318,7 @@ internal sealed class MainWindow : Window
         StyleDestructiveButton(recycleRejectedButton, 0);
         recycleRejectedButton.HorizontalAlignment = HorizontalAlignment.Stretch;
         recycleRejectedButton.Margin = new Thickness(0, 8, 0, 0);
-        recycleRejectedButton.IsHitTestVisible = rejectedFiles.Count > 0;
-        recycleRejectedButton.Opacity = rejectedFiles.Count > 0 ? 1.0 : 0.52;
+        UpdateRejectedButtonState();
         recycleRejectedButton.Click -= RecycleRejectedPairs;
         recycleRejectedButton.Click += RecycleRejectedPairs;
         footer.Children.Add(recycleRejectedButton);
@@ -1312,6 +1421,9 @@ internal sealed class MainWindow : Window
         singleImage = new Image();
         singleViewer = new ScrollViewer();
         singleCaption = new TextBlock();
+        singleCullBadge = new Border();
+        singleCullBadgeText = new TextBlock();
+        advanceTargetButton = new Button();
         zoomBox = new TextBox();
         navigatorCanvas = new Canvas();
         navigatorImage = new Image();
@@ -1381,6 +1493,8 @@ internal sealed class MainWindow : Window
                     gallerySortMode = NormalizeSortMode(line.Substring(5));
                 else if (line.StartsWith("filter=", StringComparison.OrdinalIgnoreCase))
                     activeFilter = NormalizeFilter(line.Substring(7));
+                else if (line.StartsWith("advance_target=", StringComparison.OrdinalIgnoreCase))
+                    advanceToUndecided = !String.Equals(line.Substring(15), "next", StringComparison.OrdinalIgnoreCase);
                 else if (line.StartsWith("folder=", StringComparison.OrdinalIgnoreCase))
                 {
                     var folder = line.Substring(7);
@@ -1409,6 +1523,7 @@ internal sealed class MainWindow : Window
             lines.Add("grid_tile_width=" + gridTileWidth.ToString("0", CultureInfo.InvariantCulture));
             lines.Add("sort=" + gallerySortMode);
             lines.Add("filter=" + activeFilter);
+            lines.Add("advance_target=" + (advanceToUndecided ? "undecided" : "next"));
             if (!forgetFolderHistoryUntilNextScan)
                 lines.AddRange(recentFolders.Take(3).Select(folder => "folder=" + folder));
             File.WriteAllLines(settingsPath, lines);
@@ -1459,24 +1574,28 @@ internal sealed class MainWindow : Window
             return;
         }
 
-        ScanDirectory();
         if (singleViewMode)
         {
-            EnsureGalleryFiles();
-            if (String.IsNullOrWhiteSpace(currentSingleFile) || !galleryFiles.Contains(currentSingleFile, StringComparer.OrdinalIgnoreCase))
-                currentSingleFile = galleryFiles.FirstOrDefault();
+            var root = RootFolder(false);
+            var sessionFiles = root == null
+                ? new List<string>()
+                : FilesIn(Path.Combine(root, "jpg")).Where(IsJpg).ToList();
+            if (String.IsNullOrWhiteSpace(currentSingleFile) || !sessionFiles.Contains(currentSingleFile, StringComparer.OrdinalIgnoreCase))
+                currentSingleFile = sessionFiles.FirstOrDefault();
             if (String.IsNullOrWhiteSpace(currentSingleFile))
             {
                 singleViewMode = false;
                 RebuildUi();
                 return;
             }
+            // The constructor deliberately built only a lightweight grid shell.
+            // Build the real single-photo controls now that the window is visible.
+            RebuildUi();
             ShowPhotoInfo(currentSingleFile);
-            LoadSinglePhoto();
-            UpdateFilmStripSelection();
         }
         else
         {
+            ScanDirectory();
             RefreshGallery();
             RestoreGridCurrentPhoto();
         }
@@ -1565,22 +1684,70 @@ internal sealed class MainWindow : Window
     private DateTime? ReadCaptureDate(string file)
     {
         DateTime? cached;
-        if (captureDateCache.TryGetValue(file, out cached)) return cached;
-        DateTime? result = null;
+        lock (captureDateCacheLock)
+        {
+            if (captureDateCache.TryGetValue(file, out cached)) return cached;
+        }
+        LoadGalleryMetadata(file);
+        lock (captureDateCacheLock)
+        {
+            return captureDateCache.TryGetValue(file, out cached) ? cached : null;
+        }
+    }
+
+    private void LoadGalleryMetadata(string file)
+    {
+        var hasCaptureDate = false;
+        lock (captureDateCacheLock) hasCaptureDate = captureDateCache.ContainsKey(file);
+        BitmapSource cachedThumbnail;
+        int cachedWidth;
+        var hasEmbeddedThumbnail = TryGetAnyCachedThumbnail(file, out cachedThumbnail, out cachedWidth) && cachedWidth >= 160;
+        if (hasCaptureDate && hasEmbeddedThumbnail) return;
+
+        DateTime? captureDate = null;
+        BitmapSource embeddedThumbnail = null;
         try
         {
             using (var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
             {
                 var decoder = BitmapDecoder.Create(stream, BitmapCreateOptions.PreservePixelFormat, BitmapCacheOption.OnDemand);
-                var metadata = decoder.Frames.Count > 0 ? decoder.Frames[0].Metadata as BitmapMetadata : null;
-                result = ParseExifDate(ReadMetadataValue(metadata, "/app1/ifd/exif/{ushort=36867}"));
-                if (!result.HasValue) result = ParseExifDate(ReadMetadataValue(metadata, "/app1/ifd/exif/{ushort=36868}"));
-                if (!result.HasValue) result = ParseExifDate(ReadMetadataValue(metadata, "/app1/ifd/{ushort=306}"));
+                if (decoder.Frames.Count > 0)
+                {
+                    var frame = decoder.Frames[0];
+                    var metadata = frame.Metadata as BitmapMetadata;
+                    captureDate = ParseExifDate(ReadMetadataValue(metadata, "/app1/ifd/exif/{ushort=36867}"));
+                    if (!captureDate.HasValue) captureDate = ParseExifDate(ReadMetadataValue(metadata, "/app1/ifd/exif/{ushort=36868}"));
+                    if (!captureDate.HasValue) captureDate = ParseExifDate(ReadMetadataValue(metadata, "/app1/ifd/{ushort=306}"));
+
+                    if (!hasEmbeddedThumbnail && frame.Thumbnail != null)
+                    {
+                        var orientationValue = ReadMetadataValue(metadata, "/app1/ifd/{ushort=274}");
+                        var orientation = orientationValue == null ? 1 : Convert.ToInt32(orientationValue, CultureInfo.InvariantCulture);
+                        if (orientation < 1 || orientation > 8) orientation = 1;
+                        embeddedThumbnail = frame.Thumbnail;
+                        if (embeddedThumbnail.CanFreeze) embeddedThumbnail.Freeze();
+                        embeddedThumbnail = ApplyExifOrientation(embeddedThumbnail, orientation);
+                    }
+                }
             }
         }
         catch { }
-        captureDateCache[file] = result;
-        return result;
+        lock (captureDateCacheLock)
+        {
+            if (!captureDateCache.ContainsKey(file)) captureDateCache[file] = captureDate;
+        }
+        if (embeddedThumbnail != null)
+            CacheThumbnail(file, Math.Max(embeddedThumbnail.PixelWidth, embeddedThumbnail.PixelHeight), embeddedThumbnail);
+    }
+
+    private bool IsCaptureDateCached(string file)
+    {
+        lock (captureDateCacheLock) return captureDateCache.ContainsKey(file);
+    }
+
+    private void PreloadGalleryMetadata(IEnumerable<string> files)
+    {
+        Parallel.ForEach(files, new ParallelOptions { MaxDegreeOfParallelism = 4 }, LoadGalleryMetadata);
     }
 
     private void ScanDirectory()
@@ -1734,7 +1901,38 @@ internal sealed class MainWindow : Window
         var root = RootFolder(false);
         if (root == null) return;
         var jpgFolder = Path.Combine(root, "jpg");
-        var jpgs = SortGalleryFiles(FilesIn(jpgFolder).Where(IsJpg));
+        var sourceJpgs = FilesIn(jpgFolder).Where(IsJpg).ToList();
+        if ((gallerySortMode == "capture_asc" || gallerySortMode == "capture_desc") && sourceJpgs.Any(file => !IsCaptureDateCached(file)))
+        {
+            var version = galleryThumbnailLoadVersion;
+            galleryCaption.Text = "正在读取 " + sourceJpgs.Count.ToString("N0") + " 张照片信息…";
+            gallery.Children.Add(new TextBlock
+            {
+                Text = "正在准备缩略图…",
+                Margin = new Thickness(20),
+                FontSize = 15,
+                Foreground = Brush("#75869A")
+            });
+            Task.Factory.StartNew(delegate { PreloadGalleryMetadata(sourceJpgs); }).ContinueWith(delegate(Task task)
+            {
+                Dispatcher.BeginInvoke(DispatcherPriority.ContextIdle, new Action(delegate
+                {
+                    if (version != galleryThumbnailLoadVersion || singleViewMode) return;
+                    var currentRoot = RootFolder(false);
+                    if (!String.Equals(currentRoot, root, StringComparison.OrdinalIgnoreCase)) return;
+                    PopulateGallery(sourceJpgs);
+                    RestoreGridCurrentPhoto();
+                }));
+            });
+            return;
+        }
+        PopulateGallery(sourceJpgs);
+    }
+
+    private void PopulateGallery(IEnumerable<string> sourceJpgs)
+    {
+        gallery.Children.Clear();
+        var jpgs = SortGalleryFiles(sourceJpgs);
         galleryFiles.AddRange(jpgs);
         var visibleJpgs = jpgs.Where(MatchesFilter).ToList();
         if (visibleJpgs.Count == 0)
@@ -1833,8 +2031,14 @@ internal sealed class MainWindow : Window
         var tile = new Border { Width = gridTileWidth, Margin = new Thickness(6), Padding = new Thickness(6), Background = Brush("#FFFFFF"), BorderBrush = Brush("#D6E0EA"), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(6), Cursor = Cursors.Hand };
         var stack = new StackPanel();
         var previewBorder = new Border { Height = previewHeight, Background = Brush("#EAF0F5"), CornerRadius = new CornerRadius(4), ClipToBounds = true };
-        previewBorder.Child = new TextBlock { Text = "正在加载…", Foreground = Brush("#75869A"), HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
-        lazyThumbnailFiles[previewBorder] = file;
+        var decodeWidth = (int)Math.Round(gridTileWidth * 1.33);
+        BitmapSource cachedThumbnail;
+        int cachedWidth;
+        if (TryGetAnyCachedThumbnail(file, out cachedThumbnail, out cachedWidth))
+            previewBorder.Child = CreateThumbnailImage(cachedThumbnail);
+        else
+            previewBorder.Child = new TextBlock { Text = "正在加载…", Foreground = Brush("#75869A"), HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
+        if (cachedThumbnail == null || cachedWidth < decodeWidth) lazyThumbnailFiles[previewBorder] = file;
         var previewGrid = new Grid { Height = previewHeight };
         previewGrid.Children.Add(previewBorder);
         var mark = MarkLabel(file);
@@ -1880,38 +2084,73 @@ internal sealed class MainWindow : Window
     {
         if (singleViewMode || galleryScrollViewer == null || !galleryScrollViewer.IsLoaded) return;
         var version = galleryThumbnailLoadVersion;
+        var pending = new Queue<Tuple<Border, string, int>>();
         foreach (var item in lazyThumbnailFiles.ToList())
         {
             var preview = item.Key;
-            if (preview.Child is Image || loadingThumbnailTiles.Contains(preview) || !IsThumbnailNearViewport(preview)) continue;
+            if (loadingThumbnailTiles.Contains(preview) || !IsThumbnailNearViewport(preview)) continue;
             loadingThumbnailTiles.Add(preview);
-            var file = item.Value;
-            var decodeWidth = (int)Math.Round(gridTileWidth * 1.33);
-            Task.Factory.StartNew(delegate { return LoadOrientedJpeg(file, decodeWidth); }).ContinueWith(delegate(Task<BitmapSource> task)
+            pending.Enqueue(Tuple.Create(preview, item.Value, (int)Math.Round(gridTileWidth * 1.33)));
+        }
+        if (pending.Count == 0) return;
+
+        var queueLock = new object();
+        var workerCount = Math.Min(2, pending.Count);
+        for (var workerIndex = 0; workerIndex < workerCount; workerIndex++)
+        {
+            Task.Factory.StartNew(delegate
             {
-                Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(delegate
+                while (version == galleryThumbnailLoadVersion)
                 {
-                    loadingThumbnailTiles.Remove(preview);
-                    string expected;
-                    if (version != galleryThumbnailLoadVersion || !lazyThumbnailFiles.TryGetValue(preview, out expected) ||
-                        !String.Equals(expected, file, StringComparison.OrdinalIgnoreCase)) return;
-                    if (task.Status == TaskStatus.RanToCompletion)
+                    Tuple<Border, string, int> work;
+                    lock (queueLock)
                     {
-                        var image = new Image
+                        if (pending.Count == 0) return;
+                        work = pending.Dequeue();
+                    }
+
+                    var preview = work.Item1;
+                    var file = work.Item2;
+                    BitmapSource quickThumbnail = null;
+                    try { quickThumbnail = LoadEmbeddedThumbnail(file); }
+                    catch { }
+                    if (quickThumbnail != null)
+                    {
+                        var quickResult = quickThumbnail;
+                        Dispatcher.BeginInvoke(DispatcherPriority.Render, new Action(delegate
                         {
-                            Source = task.Result,
-                            Stretch = Stretch.Uniform,
-                            HorizontalAlignment = HorizontalAlignment.Center,
-                            VerticalAlignment = VerticalAlignment.Center
-                        };
-                        RenderOptions.SetBitmapScalingMode(image, BitmapScalingMode.HighQuality);
-                        preview.Child = image;
+                            string expected;
+                            if (version != galleryThumbnailLoadVersion || !lazyThumbnailFiles.TryGetValue(preview, out expected) ||
+                                !String.Equals(expected, file, StringComparison.OrdinalIgnoreCase)) return;
+                            preview.Child = CreateThumbnailImage(quickResult);
+                        }));
                     }
-                    else
+
+                    if (version != galleryThumbnailLoadVersion) return;
+                    BitmapSource qualityThumbnail = null;
+                    var qualityLoaded = false;
+                    try
                     {
-                        preview.Child = new TextBlock { Text = "无法预览", Foreground = Brush("#75869A"), HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
+                        qualityThumbnail = LoadCachedThumbnail(file, work.Item3);
+                        qualityLoaded = qualityThumbnail != null;
                     }
-                }));
+                    catch { }
+
+                    var finalResult = qualityThumbnail;
+                    var finalLoaded = qualityLoaded;
+                    Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(delegate
+                    {
+                        loadingThumbnailTiles.Remove(preview);
+                        string expected;
+                        if (version != galleryThumbnailLoadVersion || !lazyThumbnailFiles.TryGetValue(preview, out expected) ||
+                            !String.Equals(expected, file, StringComparison.OrdinalIgnoreCase)) return;
+                        if (finalLoaded)
+                            preview.Child = CreateThumbnailImage(finalResult);
+                        else if (!(preview.Child is Image))
+                            preview.Child = new TextBlock { Text = "无法预览", Foreground = Brush("#75869A"), HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
+                        lazyThumbnailFiles.Remove(preview);
+                    }));
+                }
             });
         }
     }
@@ -2084,15 +2323,45 @@ internal sealed class MainWindow : Window
 
     private string NextUndecidedPhoto(string active)
     {
+        return UndecidedPhotoInDirection(active, 1);
+    }
+
+    private string PreviousUndecidedPhoto(string active)
+    {
+        return UndecidedPhotoInDirection(active, -1);
+    }
+
+    private string UndecidedPhotoInDirection(string active, int direction)
+    {
+        if (String.IsNullOrWhiteSpace(active)) return null;
+        EnsureGalleryFiles();
+        if (galleryFiles.Count == 0) return null;
+        var step = direction < 0 ? -1 : 1;
+        var index = galleryFiles.FindIndex(item => String.Equals(item, active, StringComparison.OrdinalIgnoreCase));
+        var candidateCount = index < 0 ? galleryFiles.Count : galleryFiles.Count - 1;
+        if (index < 0) index = step > 0 ? -1 : 0;
+        for (var offset = 1; offset <= candidateCount; offset++)
+        {
+            var candidateIndex = (index + step * offset) % galleryFiles.Count;
+            if (candidateIndex < 0) candidateIndex += galleryFiles.Count;
+            var candidate = galleryFiles[candidateIndex];
+            if (!pickedFiles.Contains(candidate) && !rejectedFiles.Contains(candidate) && File.Exists(candidate))
+                return candidate;
+        }
+        return null;
+    }
+
+    private string NextPhotoInCurrentSort(string active)
+    {
         if (String.IsNullOrWhiteSpace(active)) return null;
         EnsureGalleryFiles();
         if (galleryFiles.Count == 0) return null;
         var index = galleryFiles.FindIndex(item => String.Equals(item, active, StringComparison.OrdinalIgnoreCase));
-        for (var offset = 1; offset <= galleryFiles.Count; offset++)
+        var candidateCount = index < 0 ? galleryFiles.Count : galleryFiles.Count - 1;
+        for (var offset = 1; offset <= candidateCount; offset++)
         {
             var candidate = galleryFiles[(index + offset + galleryFiles.Count) % galleryFiles.Count];
-            if (!pickedFiles.Contains(candidate) && !rejectedFiles.Contains(candidate) && File.Exists(candidate))
-                return candidate;
+            if (File.Exists(candidate)) return candidate;
         }
         return null;
     }
@@ -2138,9 +2407,11 @@ internal sealed class MainWindow : Window
         EnsureGalleryFiles();
         var cullingFilter = activeFilter == "all" || activeFilter == "undecided";
         var shouldAdvance = advanceRequested && !becameUndecided && cullingFilter;
-        var nextFile = shouldAdvance ? NextUndecidedPhoto(file) : null;
-        var completed = shouldAdvance && galleryFiles.Count > 0 && String.IsNullOrWhiteSpace(nextFile)
+        var completed = shouldAdvance && galleryFiles.Count > 0
                      && galleryFiles.All(item => pickedFiles.Contains(item) || rejectedFiles.Contains(item));
+        var nextFile = shouldAdvance && !completed
+            ? (advanceToUndecided ? NextUndecidedPhoto(file) : NextPhotoInCurrentSort(file))
+            : null;
         var targetFile = file;
         var advanceMessage = String.Empty;
 
@@ -2151,7 +2422,9 @@ internal sealed class MainWindow : Window
             if (!String.IsNullOrWhiteSpace(nextFile) && File.Exists(nextFile))
             {
                 targetFile = nextFile;
-                advanceMessage = " 已跳到下一张未决定的照片。";
+                advanceMessage = advanceToUndecided
+                    ? " 已跳到下一张未决定照片。"
+                    : " 已按当前排序跳到下一张照片。";
             }
         }
         else if (advanceRequested && !cullingFilter)
@@ -2160,8 +2433,18 @@ internal sealed class MainWindow : Window
         currentSingleFile = targetFile;
         if (singleViewMode)
         {
-            RebuildUi();
-            ShowPhotoInfo(currentSingleFile);
+            // Flagging a photo must not tear down the entire single-photo view.
+            // Rebuilding here discarded every filmstrip thumbnail and made a
+            // 33-photo folder visibly reload for several seconds.
+            UpdateCullProgress();
+            UpdateSingleCullStatus();
+            UpdateFilmStripSelection();
+            if (!String.Equals(file, targetFile, StringComparison.OrdinalIgnoreCase))
+            {
+                ShowPhotoInfo(currentSingleFile);
+                LoadSinglePhoto();
+            }
+            else singleViewer.ContextMenu = BuildTileMenu(currentSingleFile);
         }
         else RebuildUi();
         if (completed)
@@ -2247,8 +2530,24 @@ internal sealed class MainWindow : Window
         }
         var index = galleryFiles.FindIndex(item => String.Equals(item, currentSingleFile, StringComparison.OrdinalIgnoreCase));
         if (index < 0 || galleryFiles.Count == 0) return;
-        index = (index + direction + galleryFiles.Count) % galleryFiles.Count;
-        currentSingleFile = galleryFiles[index];
+        if (advanceToUndecided)
+        {
+            var undecided = direction < 0
+                ? PreviousUndecidedPhoto(currentSingleFile)
+                : NextUndecidedPhoto(currentSingleFile);
+            if (String.IsNullOrWhiteSpace(undecided))
+            {
+                SetStatus("没有其他未决定照片。可切换到“浏览”逐张查看。", false);
+                return;
+            }
+            currentSingleFile = undecided;
+            SetStatus(direction < 0 ? "已跳到上一张未决定照片。" : "已跳到下一张未决定照片。", false);
+        }
+        else
+        {
+            index = (index + direction + galleryFiles.Count) % galleryFiles.Count;
+            currentSingleFile = galleryFiles[index];
+        }
         ShowPhotoInfo(currentSingleFile);
         LoadSinglePhoto();
         UpdateFilmStripSelection();
@@ -2263,6 +2562,7 @@ internal sealed class MainWindow : Window
         var version = ++singleLoadVersion;
         singleCaption.Text = Path.GetFileName(file);
         singleCaption.ToolTip = singleCaption.Text;
+        UpdateSingleCullStatus();
         singleViewer.ContextMenu = BuildTileMenu(file);
         targetImage.Source = null;
         navigatorImage.Source = null;
@@ -2328,17 +2628,18 @@ internal sealed class MainWindow : Window
         if (galleryFiles.Count < 2) return;
         var index = galleryFiles.FindIndex(item => String.Equals(item, file, StringComparison.OrdinalIgnoreCase));
         if (index < 0) return;
-        var previous = galleryFiles[(index - 1 + galleryFiles.Count) % galleryFiles.Count];
         var next = galleryFiles[(index + 1) % galleryFiles.Count];
-        if (File.Exists(previous)) GetFullImageTask(previous);
-        if (!String.Equals(previous, next, StringComparison.OrdinalIgnoreCase) && File.Exists(next)) GetFullImageTask(next);
+        // Culling primarily moves forward. Loading both neighbours at full camera
+        // resolution made startup and every cache miss compete for CPU and memory.
+        // The previous image is already retained by the LRU after a forward move.
+        if (File.Exists(next)) GetFullImageTask(next);
     }
 
     private void AddFullImageCacheLocked(string file, BitmapSource image)
     {
         fullImageCache[file] = image;
         TouchFullImageCacheLocked(file);
-        while (fullImageCacheLru.Count > 5)
+        while (fullImageCacheLru.Count > 3)
         {
             var oldest = fullImageCacheLru.First.Value;
             fullImageCacheLru.RemoveFirst();
@@ -2353,6 +2654,88 @@ internal sealed class MainWindow : Window
         fullImageCacheLru.AddLast(file);
     }
 
+    private BitmapSource LoadCachedThumbnail(string file, int decodePixelWidth)
+    {
+        BitmapSource cached;
+        int cachedWidth;
+        if (TryGetAnyCachedThumbnail(file, out cached, out cachedWidth) && cachedWidth >= decodePixelWidth)
+            return cached;
+
+        var loaded = LoadOrientedJpeg(file, decodePixelWidth);
+        return CacheThumbnail(file, decodePixelWidth, loaded);
+    }
+
+    private BitmapSource LoadEmbeddedThumbnail(string file)
+    {
+        BitmapSource cached;
+        int cachedWidth;
+        if (TryGetAnyCachedThumbnail(file, out cached, out cachedWidth) && cachedWidth >= 160)
+            return cached;
+        LoadGalleryMetadata(file);
+        return TryGetAnyCachedThumbnail(file, out cached, out cachedWidth) ? cached : null;
+    }
+
+    private BitmapSource CacheThumbnail(string file, int decodePixelWidth, BitmapSource loaded)
+    {
+        if (loaded == null) return null;
+        lock (thumbnailCacheLock)
+        {
+            Tuple<int, BitmapSource> existing;
+            if (thumbnailCache.TryGetValue(file, out existing) && existing.Item1 >= decodePixelWidth)
+            {
+                TouchThumbnailCacheLocked(file);
+                return existing.Item2;
+            }
+            thumbnailCache[file] = Tuple.Create(decodePixelWidth, loaded);
+            TouchThumbnailCacheLocked(file);
+            while (thumbnailCacheLru.Count > MaxThumbnailCacheItems)
+            {
+                var oldest = thumbnailCacheLru.First.Value;
+                thumbnailCacheLru.RemoveFirst();
+                thumbnailCache.Remove(oldest);
+            }
+        }
+        return loaded;
+    }
+
+    private bool TryGetAnyCachedThumbnail(string file, out BitmapSource image, out int decodePixelWidth)
+    {
+        lock (thumbnailCacheLock)
+        {
+            Tuple<int, BitmapSource> cached;
+            if (thumbnailCache.TryGetValue(file, out cached))
+            {
+                decodePixelWidth = cached.Item1;
+                image = cached.Item2;
+                TouchThumbnailCacheLocked(file);
+                return true;
+            }
+        }
+        decodePixelWidth = 0;
+        image = null;
+        return false;
+    }
+
+    private void TouchThumbnailCacheLocked(string file)
+    {
+        var node = thumbnailCacheLru.Find(file);
+        if (node != null) thumbnailCacheLru.Remove(node);
+        thumbnailCacheLru.AddLast(file);
+    }
+
+    private static Image CreateThumbnailImage(BitmapSource source)
+    {
+        var image = new Image
+        {
+            Source = source,
+            Stretch = Stretch.Uniform,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        RenderOptions.SetBitmapScalingMode(image, BitmapScalingMode.HighQuality);
+        return image;
+    }
+
     private void ClearFullImageCache()
     {
         lock (fullImageCacheLock)
@@ -2362,7 +2745,12 @@ internal sealed class MainWindow : Window
             fullImageLoadTasks.Clear();
             fullImageCacheLru.Clear();
         }
-        captureDateCache.Clear();
+        lock (thumbnailCacheLock)
+        {
+            thumbnailCache.Clear();
+            thumbnailCacheLru.Clear();
+        }
+        lock (captureDateCacheLock) captureDateCache.Clear();
     }
 
     private void SingleViewerMouseWheel(object sender, MouseWheelEventArgs e)
@@ -2688,6 +3076,35 @@ internal sealed class MainWindow : Window
         return source;
     }
 
+    private static BitmapSource ApplyExifOrientation(BitmapSource source, int orientation)
+    {
+        var degrees = 0;
+        if (orientation == 3) degrees = 180;
+        else if (orientation == 5 || orientation == 6 || orientation == 7) degrees = 90;
+        else if (orientation == 8) degrees = 270;
+        if (degrees != 0)
+        {
+            var rotation = new RotateTransform(degrees);
+            rotation.Freeze();
+            var rotated = new TransformedBitmap(source, rotation);
+            rotated.Freeze();
+            source = rotated;
+        }
+
+        ScaleTransform mirror = null;
+        if (orientation == 2 || orientation == 5) mirror = new ScaleTransform(-1, 1);
+        else if (orientation == 4 || orientation == 7) mirror = new ScaleTransform(1, -1);
+        if (mirror != null)
+        {
+            mirror.Freeze();
+            var mirrored = new TransformedBitmap(source, mirror);
+            mirrored.Freeze();
+            source = mirrored;
+        }
+        if (source.CanFreeze) source.Freeze();
+        return source;
+    }
+
     private static int ReadExifOrientation(string file)
     {
         try
@@ -2717,22 +3134,32 @@ internal sealed class MainWindow : Window
 
     private void ShowPhotoInfo(string file)
     {
-        BitmapMetadata metadata = null;
+        var date = "—";
+        var model = "—";
+        var iso = "—";
+        var aperture = "—";
+        var exposure = "—";
+        var focalLength = "—";
         try
         {
-            var decoder = BitmapDecoder.Create(new Uri(file, UriKind.Absolute), BitmapCreateOptions.PreservePixelFormat, BitmapCacheOption.OnLoad);
-            metadata = decoder.Frames.Count > 0 ? decoder.Frames[0].Metadata as BitmapMetadata : null;
+            // Metadata-only access keeps the UI thread from synchronously decoding
+            // the full-resolution JPEG whenever the user advances to a new photo.
+            using (var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+            {
+                var decoder = BitmapDecoder.Create(stream, BitmapCreateOptions.PreservePixelFormat, BitmapCacheOption.OnDemand);
+                var metadata = decoder.Frames.Count > 0 ? decoder.Frames[0].Metadata as BitmapMetadata : null;
+                date = FormatExifDate(ReadMetadataValue(metadata, "/app1/ifd/exif/{ushort=36867}"));
+                if (date == "—") date = FormatExifDate(ReadMetadataValue(metadata, "/app1/ifd/exif/{ushort=36868}"));
+                if (date == "—") date = FormatExifDate(ReadMetadataValue(metadata, "/app1/ifd/{ushort=306}"));
+                model = ToDisplayText(ReadMetadataValue(metadata, "/app1/ifd/{ushort=272}"));
+                iso = ToDisplayText(ReadMetadataValue(metadata, "/app1/ifd/exif/{ushort=34855}"));
+                aperture = FormatAperture(ReadMetadataValue(metadata, "/app1/ifd/exif/{ushort=33437}"));
+                exposure = FormatExposure(ReadMetadataValue(metadata, "/app1/ifd/exif/{ushort=33434}"));
+                focalLength = FormatFocalLength(ReadMetadataValue(metadata, "/app1/ifd/exif/{ushort=37386}"));
+            }
         }
         catch { }
 
-        var date = FormatExifDate(ReadMetadataValue(metadata, "/app1/ifd/exif/{ushort=36867}"));
-        if (date == "—") date = FormatExifDate(ReadMetadataValue(metadata, "/app1/ifd/exif/{ushort=36868}"));
-        if (date == "—") date = FormatExifDate(ReadMetadataValue(metadata, "/app1/ifd/{ushort=306}"));
-        var model = ToDisplayText(ReadMetadataValue(metadata, "/app1/ifd/{ushort=272}"));
-        var iso = ToDisplayText(ReadMetadataValue(metadata, "/app1/ifd/exif/{ushort=34855}"));
-        var aperture = FormatAperture(ReadMetadataValue(metadata, "/app1/ifd/exif/{ushort=33437}"));
-        var exposure = FormatExposure(ReadMetadataValue(metadata, "/app1/ifd/exif/{ushort=33434}"));
-        var focalLength = FormatFocalLength(ReadMetadataValue(metadata, "/app1/ifd/exif/{ushort=37386}"));
         photoInfo.Text = "拍摄日期：" + date
             + "    照相机型号：" + model
             + "    ISO：" + iso
