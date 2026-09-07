@@ -9,6 +9,8 @@ using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Reflection;
+using System.Security.Cryptography;
+using System.Text;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
@@ -27,9 +29,9 @@ using Forms = System.Windows.Forms;
 [assembly: AssemblyCompany("ren8484")]
 [assembly: AssemblyProduct("RAWMate")]
 [assembly: AssemblyCopyright("Copyright © 2026 ren8484")]
-[assembly: AssemblyVersion("1.3.1.0")]
-[assembly: AssemblyFileVersion("1.3.1.0")]
-[assembly: AssemblyInformationalVersion("1.3.1")]
+[assembly: AssemblyVersion("1.4.0.0")]
+[assembly: AssemblyFileVersion("1.4.0.0")]
+[assembly: AssemblyInformationalVersion("1.4.0")]
 
 internal static class Program
 {
@@ -55,6 +57,13 @@ internal static class Program
 
 internal sealed class MainWindow : Window
 {
+    private sealed class RecycleResult
+    {
+        public readonly List<string> SuccessPaths = new List<string>();
+        public readonly List<string> FailedPaths = new List<string>();
+        public readonly List<string> Notes = new List<string>();
+    }
+
     private TextBox folderBox = new TextBox();
     private Button folderHistoryButton = new Button();
     private WrapPanel gallery = new WrapPanel();
@@ -102,6 +111,11 @@ internal sealed class MainWindow : Window
     private readonly List<string> galleryFiles = new List<string>();
     private readonly HashSet<string> pickedFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> rejectedFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> jpgOnlyFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> rawOnlyFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    // Completed RAW-only decisions are anchored to the surviving RAW, not a deleted JPG.
+    private readonly HashSet<string> retainedRawFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    private bool cullMarksReadFailed;
     private Border selectionAnchor;
     private string currentSingleFile;
     private bool singleViewMode;
@@ -127,11 +141,20 @@ internal sealed class MainWindow : Window
     private readonly LinkedList<string> thumbnailCacheLru = new LinkedList<string>();
     private readonly object captureDateCacheLock = new object();
     private readonly Dictionary<string, DateTime?> captureDateCache = new Dictionary<string, DateTime?>(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, string> captureDateStampCache = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
     private int fullImageCacheGeneration;
     private readonly List<string> recentFolders = new List<string>();
     private bool forgetFolderHistoryUntilNextScan;
-    private readonly string settingsPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RAWMate", "settings.txt");
-    private readonly string cullMarksPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RAWMate", "cull-marks.txt");
+    private static readonly string StateDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        Path.GetFileNameWithoutExtension(Assembly.GetExecutingAssembly().Location).EndsWith("-Test", StringComparison.OrdinalIgnoreCase) ? "RAWMate-Test-1.4" : "RAWMate");
+    // Thumbnails are derived, disposable data. Sharing this cache between the formal and
+    // test executables avoids decoding the same camera files again when comparing builds.
+    private static readonly string ThumbnailCacheDirectory = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RAWMate", "thumbnail-cache-v1");
+    private static readonly string CaptureDateCachePath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RAWMate", "capture-date-cache-v1.txt");
+    private readonly string settingsPath = Path.Combine(StateDirectory, "settings.txt");
+    private readonly string cullMarksPath = Path.Combine(StateDirectory, "cull-marks-v2.txt");
     private string activeFilter = "all";
     private string lastFolder;
     private string gallerySortMode = "name_asc";
@@ -143,6 +166,7 @@ internal sealed class MainWindow : Window
     private const double PreferredMinimumWindowHeight = 640;
     private const double SidebarWidth = 320;
     private const int MaxThumbnailCacheItems = 512;
+    private const int PersistentThumbnailWidth = 384;
     // The sidebar column also contains outer margins, border and padding; 280 DIPs
     // matches the original usable content width so large screens are not rescaled.
     private const double SidebarContentWidth = 280;
@@ -167,6 +191,7 @@ internal sealed class MainWindow : Window
         SourceInitialized += delegate { ApplyDarkTitleBar(); };
         LoadSettings();
         LoadCullMarks();
+        LoadCaptureDateCache();
         if (!String.IsNullOrWhiteSpace(lastFolder)) folderBox.Text = lastFolder;
         Background = Brush("#171B21");
         UseLayoutRounding = true;
@@ -184,7 +209,7 @@ internal sealed class MainWindow : Window
         {
             Dispatcher.BeginInvoke(DispatcherPriority.ContextIdle, new Action(RestoreSession));
         };
-        Closing += delegate { SaveSettings(); SaveCullMarks(); };
+        Closing += delegate { SaveSettings(); SaveCullMarks(); SaveCaptureDateCache(); };
     }
 
     private void ApplyInitialWindowSize()
@@ -557,8 +582,9 @@ internal sealed class MainWindow : Window
         var currentFiles = new List<string>();
         var root = RootFolder(false);
         if (root != null) currentFiles = FilesIn(Path.Combine(root, "jpg")).Where(IsJpg).ToList();
-        var total = currentFiles.Count;
-        var picked = currentFiles.Count(pickedFiles.Contains);
+        var completedRaw = root == null ? 0 : CompletedRawOnlyInRoot(root).Count;
+        var total = currentFiles.Count + completedRaw;
+        var picked = currentFiles.Count(IsKept) + completedRaw;
         var rejected = currentFiles.Count(rejectedFiles.Contains);
         var decided = picked + rejected;
         var percent = total > 0 ? (int)Math.Round(decided * 100.0 / total) : 0;
@@ -575,7 +601,8 @@ internal sealed class MainWindow : Window
     private void UpdateRejectedButtonState()
     {
         if (recycleRejectedButton == null) return;
-        var enabled = rejectedFiles.Count > 0;
+        var root = RootFolder(false);
+        var enabled = !cullMarksReadFailed && root != null && BuildCleanupPlan(root).Items.Count > 0;
         recycleRejectedButton.IsHitTestVisible = enabled;
         recycleRejectedButton.Opacity = enabled ? 1.0 : 0.52;
     }
@@ -787,15 +814,24 @@ internal sealed class MainWindow : Window
         if (singleCullBadge == null || singleCullBadgeText == null) return;
         if (!String.IsNullOrWhiteSpace(currentSingleFile) && pickedFiles.Contains(currentSingleFile))
         {
-            singleCullBadgeText.Text = "P  保留";
+            singleCullBadgeText.Text = "双格式";
             singleCullBadgeText.Foreground = Brush("#65E27A");
             singleCullBadge.Background = Brush("#E6213328");
             singleCullBadge.BorderBrush = Brush("#7258D26E");
-            singleCullBadge.ToolTip = "当前照片状态：保留";
+            singleCullBadge.ToolTip = "保留 JPG + RAW";
+        }
+        else if (DecisionOf(currentSingleFile) == "J" || DecisionOf(currentSingleFile) == "R")
+        {
+            var jpg = DecisionOf(currentSingleFile) == "J";
+            singleCullBadgeText.Text = jpg ? "仅 JPG" : "仅 RAW";
+            singleCullBadgeText.Foreground = Brush(jpg ? "#76B8FF" : "#C7A0FF");
+            singleCullBadge.Background = Brush("#E6212C38");
+            singleCullBadge.BorderBrush = Brush(jpg ? "#7276B8FF" : "#72C7A0FF");
+            singleCullBadge.ToolTip = jpg ? "仅保留 JPG；执行清理时回收 RAW" : "仅保留 RAW；执行清理时回收 JPG";
         }
         else if (!String.IsNullOrWhiteSpace(currentSingleFile) && rejectedFiles.Contains(currentSingleFile))
         {
-            singleCullBadgeText.Text = "X  废片";
+            singleCullBadgeText.Text = "废片";
             singleCullBadgeText.Foreground = Brush("#FF7084");
             singleCullBadge.Background = Brush("#E63B252C");
             singleCullBadge.BorderBrush = Brush("#72F0667A");
@@ -1300,12 +1336,12 @@ internal sealed class MainWindow : Window
     {
         var footer = new StackPanel();
         footer.Children.Add(SectionTitle("操作"));
-        var checkPairs = SecondaryButton("检查配对", 0);
+        var checkPairs = SecondaryButton("文件对应检查", 0);
         checkPairs.HorizontalAlignment = HorizontalAlignment.Stretch;
         checkPairs.Margin = new Thickness(0, 12, 0, 0);
         checkPairs.Click += CheckMissingPairs;
         footer.Children.Add(checkPairs);
-        recycleSelectedButton.Content = "选中项移至回收站";
+        recycleSelectedButton.Content = "选中项标记废片";
         StyleButton(recycleSelectedButton, true, 0);
         recycleSelectedButton.HorizontalAlignment = HorizontalAlignment.Stretch;
         recycleSelectedButton.Margin = new Thickness(0, 8, 0, 0);
@@ -1314,7 +1350,8 @@ internal sealed class MainWindow : Window
         recycleSelectedButton.Click -= RecycleSelectedPairs;
         recycleSelectedButton.Click += RecycleSelectedPairs;
         footer.Children.Add(recycleSelectedButton);
-        recycleRejectedButton.Content = "移除所有废片";
+        recycleRejectedButton.Content = "执行清理";
+        recycleRejectedButton.ToolTip = "根据 J / R / X 决定清理当前目录；确认后移入 Windows 回收站";
         StyleDestructiveButton(recycleRejectedButton, 0);
         recycleRejectedButton.HorizontalAlignment = HorizontalAlignment.Stretch;
         recycleRejectedButton.Margin = new Thickness(0, 8, 0, 0);
@@ -1605,47 +1642,122 @@ internal sealed class MainWindow : Window
     {
         try
         {
-            if (!File.Exists(cullMarksPath)) return;
-            foreach (var line in File.ReadAllLines(cullMarksPath))
+            var legacy = !File.Exists(cullMarksPath);
+            var source = legacy ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RAWMate", "cull-marks.txt") : cullMarksPath;
+            if (!File.Exists(source)) return;
+            var lines = File.ReadAllLines(source);
+            if (!legacy && (lines.Length == 0 || lines[0] != "RAWMate-CullMarks|2"))
+                throw new InvalidDataException("无法识别挑片记录格式，已停止写入和清理。请保留记录文件。");
+            foreach (var line in lines)
             {
                 var parts = line.Split('|');
-                if (parts.Length < 2) continue;
-                // RAWMate 1.1.x may contain legacy R records. 1.2.0 intentionally ignores
-                // every non-P/X record before decoding it, so legacy or malformed lines
-                // cannot prevent the remaining P/X decisions from loading.
-                if (parts[0] != "P" && parts[0] != "X") continue;
+                if (parts.Length != 2) continue;
+                // Old R rows were ratings, never reinterpret them as RAW-only decisions.
+                if (legacy && parts[0] != "P" && parts[0] != "X") continue;
+                if (!legacy && !new[] { "P", "J", "R", "X", "K" }.Contains(parts[0])) continue;
                 try
                 {
                     var file = System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(parts[1]));
-                    if (String.IsNullOrWhiteSpace(file)) continue;
-                    if (parts[0] == "P")
-                    {
-                        pickedFiles.Add(file);
-                        rejectedFiles.Remove(file);
-                    }
-                    else
-                    {
-                        rejectedFiles.Add(file);
-                        pickedFiles.Remove(file);
-                    }
+                    if (String.IsNullOrWhiteSpace(file) || !Path.IsPathRooted(file)) continue;
+                    file = Path.GetFullPath(file);
+                    if (parts[0] == "K" && IsRaw(file)) retainedRawFiles.Add(file);
+                    else if (IsJpg(file)) SetDecision(file, parts[0]);
                 }
-                catch { }
+                catch { if (!legacy) throw; }
+            }
+            // Recover a completed R operation if the process stopped after recycling its JPG.
+            foreach (var jpg in rawOnlyFiles.Where(file => !File.Exists(file)).ToList())
+            {
+                var parent = Path.GetDirectoryName(jpg);
+                if (!String.Equals(Path.GetFileName(parent), "jpg", StringComparison.OrdinalIgnoreCase)) continue;
+                var rawFolder = Path.Combine(Path.GetDirectoryName(parent), "arw");
+                if (retainedRawFiles.Any(raw => InFolder(raw, rawFolder) && File.Exists(raw) &&
+                    String.Equals(Stem(raw), Stem(jpg), StringComparison.OrdinalIgnoreCase))) rawOnlyFiles.Remove(jpg);
+            }
+            // A K record is only meaningful once its JPG has gone. If an interrupted
+            // R operation was later changed to another decision while the JPG still
+            // existed, do not let the old survivor intent reappear on a reused path.
+            foreach (var raw in retainedRawFiles.ToList())
+            {
+                var rawParent = Path.GetDirectoryName(raw);
+                if (!String.Equals(Path.GetFileName(rawParent), "arw", StringComparison.OrdinalIgnoreCase)) continue;
+                var jpgFolder = Path.Combine(Path.GetDirectoryName(rawParent), "jpg");
+                var jpg = FilesIn(jpgFolder).FirstOrDefault(file => IsJpg(file) && String.Equals(Stem(file), Stem(raw), StringComparison.OrdinalIgnoreCase));
+                if (jpg != null && DecisionOf(jpg) != "R") retainedRawFiles.Remove(raw);
             }
         }
-        catch { }
+        catch (Exception ex)
+        {
+            cullMarksReadFailed = true;
+            MessageBox.Show(ex.Message, "无法读取挑片记录", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
     }
 
-    private void SaveCullMarks()
+    private bool SaveCullMarks()
     {
+        if (cullMarksReadFailed) return false;
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(cullMarksPath));
-            var lines = new List<string>();
+            var lines = new List<string> { "RAWMate-CullMarks|2" };
             foreach (var file in pickedFiles) lines.Add("P|" + Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(file)));
             foreach (var file in rejectedFiles) lines.Add("X|" + Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(file)));
-            File.WriteAllLines(cullMarksPath, lines);
+            foreach (var file in jpgOnlyFiles) lines.Add("J|" + Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(file)));
+            foreach (var file in rawOnlyFiles) lines.Add("R|" + Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(file)));
+            foreach (var file in retainedRawFiles) lines.Add("K|" + Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(file)));
+            var temporary = cullMarksPath + ".tmp";
+            File.WriteAllLines(temporary, lines);
+            if (File.Exists(cullMarksPath)) File.Replace(temporary, cullMarksPath, cullMarksPath + ".bak");
+            else File.Move(temporary, cullMarksPath);
+            return true;
         }
-        catch { }
+        catch (Exception ex)
+        {
+            MessageBox.Show("挑片记录未能保存：" + ex.Message + "\n请解决后重试；后续清理已停止。", "保存失败", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return false;
+        }
+    }
+
+    private string DecisionOf(string file)
+    {
+        if (file == null) return "";
+        if (pickedFiles.Contains(file)) return "P";
+        if (jpgOnlyFiles.Contains(file)) return "J";
+        if (rawOnlyFiles.Contains(file)) return "R";
+        if (rejectedFiles.Contains(file)) return "X";
+        return "";
+    }
+
+    private bool IsKept(string file)
+    {
+        var decision = DecisionOf(file);
+        return decision == "P" || decision == "J" || decision == "R";
+    }
+
+    private bool IsDecided(string file) { return DecisionOf(file).Length > 0; }
+
+    private void SetDecision(string file, string decision)
+    {
+        if (decision != "R") RemoveRetainedRawIntentForJpg(file);
+        pickedFiles.Remove(file);
+        jpgOnlyFiles.Remove(file);
+        rawOnlyFiles.Remove(file);
+        rejectedFiles.Remove(file);
+        if (decision == "P") pickedFiles.Add(file);
+        if (decision == "J") jpgOnlyFiles.Add(file);
+        if (decision == "R") rawOnlyFiles.Add(file);
+        if (decision == "X") rejectedFiles.Add(file);
+    }
+
+    private void RemoveRetainedRawIntentForJpg(string jpg)
+    {
+        if (String.IsNullOrWhiteSpace(jpg)) return;
+        var parent = Path.GetDirectoryName(jpg);
+        if (!String.Equals(Path.GetFileName(parent), "jpg", StringComparison.OrdinalIgnoreCase)) return;
+        var rawFolder = Path.Combine(Path.GetDirectoryName(parent), "arw");
+        foreach (var raw in retainedRawFiles.Where(raw => InFolder(raw, rawFolder)
+            && String.Equals(Stem(raw), Stem(jpg), StringComparison.OrdinalIgnoreCase)).ToList())
+            retainedRawFiles.Remove(raw);
     }
 
     private void EnsureGalleryFiles()
@@ -1684,9 +1796,10 @@ internal sealed class MainWindow : Window
     private DateTime? ReadCaptureDate(string file)
     {
         DateTime? cached;
-        lock (captureDateCacheLock)
+        if (IsCaptureDateCached(file))
         {
-            if (captureDateCache.TryGetValue(file, out cached)) return cached;
+            lock (captureDateCacheLock)
+                if (captureDateCache.TryGetValue(file, out cached)) return cached;
         }
         LoadGalleryMetadata(file);
         lock (captureDateCacheLock)
@@ -1697,8 +1810,8 @@ internal sealed class MainWindow : Window
 
     private void LoadGalleryMetadata(string file)
     {
-        var hasCaptureDate = false;
-        lock (captureDateCacheLock) hasCaptureDate = captureDateCache.ContainsKey(file);
+        var stamp = FileStamp(file);
+        var hasCaptureDate = IsCaptureDateCached(file);
         BitmapSource cachedThumbnail;
         int cachedWidth;
         var hasEmbeddedThumbnail = TryGetAnyCachedThumbnail(file, out cachedThumbnail, out cachedWidth) && cachedWidth >= 160;
@@ -1734,7 +1847,8 @@ internal sealed class MainWindow : Window
         catch { }
         lock (captureDateCacheLock)
         {
-            if (!captureDateCache.ContainsKey(file)) captureDateCache[file] = captureDate;
+            captureDateCache[file] = captureDate;
+            captureDateStampCache[file] = stamp;
         }
         if (embeddedThumbnail != null)
             CacheThumbnail(file, Math.Max(embeddedThumbnail.PixelWidth, embeddedThumbnail.PixelHeight), embeddedThumbnail);
@@ -1742,12 +1856,74 @@ internal sealed class MainWindow : Window
 
     private bool IsCaptureDateCached(string file)
     {
-        lock (captureDateCacheLock) return captureDateCache.ContainsKey(file);
+        var stamp = FileStamp(file);
+        lock (captureDateCacheLock)
+        {
+            string cachedStamp;
+            if (stamp != null && captureDateCache.ContainsKey(file) && captureDateStampCache.TryGetValue(file, out cachedStamp)
+                && String.Equals(stamp, cachedStamp, StringComparison.Ordinal)) return true;
+            captureDateCache.Remove(file);
+            captureDateStampCache.Remove(file);
+            return false;
+        }
     }
 
     private void PreloadGalleryMetadata(IEnumerable<string> files)
     {
         Parallel.ForEach(files, new ParallelOptions { MaxDegreeOfParallelism = 4 }, LoadGalleryMetadata);
+        SaveCaptureDateCache();
+    }
+
+    private void LoadCaptureDateCache()
+    {
+        try
+        {
+            if (!File.Exists(CaptureDateCachePath)) return;
+            foreach (var line in File.ReadLines(CaptureDateCachePath))
+            {
+                var parts = line.Split(new[] { '|' }, 3);
+                if (parts.Length != 3) continue;
+                long ticks;
+                var path = Encoding.UTF8.GetString(Convert.FromBase64String(parts[2]));
+                DateTime? date = null;
+                if (parts[1] != "-" && long.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out ticks))
+                    date = new DateTime(ticks, DateTimeKind.Unspecified);
+                captureDateCache[path] = date;
+                captureDateStampCache[path] = parts[0];
+            }
+        }
+        catch
+        {
+            lock (captureDateCacheLock)
+            {
+                captureDateCache.Clear();
+                captureDateStampCache.Clear();
+            }
+        }
+    }
+
+    private void SaveCaptureDateCache()
+    {
+        try
+        {
+            List<string> lines;
+            lock (captureDateCacheLock)
+            {
+                lines = captureDateCache.Take(10000).Select(item =>
+                {
+                    string stamp;
+                    if (!captureDateStampCache.TryGetValue(item.Key, out stamp) || String.IsNullOrEmpty(stamp)) return null;
+                    var ticks = item.Value.HasValue ? item.Value.Value.Ticks.ToString(CultureInfo.InvariantCulture) : "-";
+                    return stamp + "|" + ticks + "|" + Convert.ToBase64String(Encoding.UTF8.GetBytes(item.Key));
+                }).Where(line => line != null).ToList();
+            }
+            Directory.CreateDirectory(Path.GetDirectoryName(CaptureDateCachePath));
+            var temporary = CaptureDateCachePath + ".tmp-" + Guid.NewGuid().ToString("N");
+            File.WriteAllLines(temporary, lines);
+            if (File.Exists(CaptureDateCachePath)) File.Replace(temporary, CaptureDateCachePath, null);
+            else File.Move(temporary, CaptureDateCachePath);
+        }
+        catch { }
     }
 
     private void ScanDirectory()
@@ -1771,11 +1947,7 @@ internal sealed class MainWindow : Window
         unorganizeButton.IsHitTestVisible = jpgTotal + rawTotal > 0;
         unorganizeButton.Opacity = jpgTotal + rawTotal > 0 ? 1.0 : 0.52;
         folderHint.Text = pendingJpg + pendingRaw > 0 ? "目录顶层有待分类的照片" : "目录顶层没有待分类照片";
-        var missing = FindMissingPairs(root);
-        var pairSummary = missing.Item1.Count == 0 && missing.Item2.Count == 0
-            ? "配对完整。"
-            : "缺少 ARW 的 JPG " + missing.Item1.Count + " 张，缺少 JPG 的 ARW " + missing.Item2.Count + " 个。";
-        SetStatus("扫描完成：jpg 文件夹 " + jpgTotal + " 张，arw 文件夹 " + rawTotal + " 张；" + pairSummary, false);
+        SetStatus("扫描完成：JPG " + jpgTotal + " 张，RAW " + rawTotal + " 张。", false);
     }
 
     private void OrganizeFiles(object sender, RoutedEventArgs e)
@@ -1891,6 +2063,9 @@ internal sealed class MainWindow : Window
     {
         if (pickedFiles.Remove(source)) pickedFiles.Add(destination);
         if (rejectedFiles.Remove(source)) rejectedFiles.Add(destination);
+        if (jpgOnlyFiles.Remove(source)) jpgOnlyFiles.Add(destination);
+        if (rawOnlyFiles.Remove(source)) rawOnlyFiles.Add(destination);
+        if (retainedRawFiles.Remove(source)) retainedRawFiles.Add(destination);
         if (selectedFiles.Remove(source)) selectedFiles.Add(destination);
         if (String.Equals(currentSingleFile, source, StringComparison.OrdinalIgnoreCase)) currentSingleFile = destination;
     }
@@ -1944,16 +2119,16 @@ internal sealed class MainWindow : Window
         foreach (var jpg in visibleJpgs) gallery.Children.Add(CreateTile(jpg));
         QueueVisibleThumbnailLoads();
         galleryCaption.Text = "筛选：" + FilterLabel() + " · " + visibleJpgs.Count + "/" + jpgs.Count + " 张 · 单击选择，双击单张浏览";
-        SetStatus("快捷键：P 保留 · X / Delete 废片，标记后自动前进\n← / → 切换照片 · 空格切换单张与网格视图", false);
+        SetStatus("P 双格式 · J 仅 JPG · R 仅 RAW · X / Delete 废片，标记后自动前进\n← / → 切换照片 · 空格切换单张与网格视图", false);
     }
 
     private bool MatchesFilter(string file)
     {
         switch (activeFilter)
         {
-            case "picked": return pickedFiles.Contains(file);
+            case "picked": return IsKept(file);
             case "rejected": return rejectedFiles.Contains(file);
-            case "undecided": return !pickedFiles.Contains(file) && !rejectedFiles.Contains(file);
+            case "undecided": return !IsDecided(file);
             default: return true;
         }
     }
@@ -2005,6 +2180,58 @@ internal sealed class MainWindow : Window
         else currentSingleFile = null;
     }
 
+    private static string PreferredPhotoAfterCleanup(IEnumerable<string> orderedFiles, string activeFile, IEnumerable<string> successPaths)
+    {
+        var files = orderedFiles == null ? new List<string>() : orderedFiles.ToList();
+        if (files.Count == 0) return null;
+        var removedJpgs = new HashSet<string>((successPaths ?? Enumerable.Empty<string>()).Where(IsJpg), StringComparer.OrdinalIgnoreCase);
+        if (!String.IsNullOrWhiteSpace(activeFile) && !removedJpgs.Contains(activeFile) && File.Exists(activeFile)) return activeFile;
+
+        var activeIndex = files.FindIndex(file => String.Equals(file, activeFile, StringComparison.OrdinalIgnoreCase));
+        if (activeIndex < 0) activeIndex = files.Count - 1;
+        for (var offset = 1; offset <= files.Count; offset++)
+        {
+            var candidate = files[(activeIndex + offset) % files.Count];
+            if (!removedJpgs.Contains(candidate) && File.Exists(candidate)) return candidate;
+        }
+        return null;
+    }
+
+    private void RefreshAfterCleanup(string preferredFile)
+    {
+        var root = RootFolder(false);
+        if (root == null)
+        {
+            currentSingleFile = null;
+            singleViewMode = false;
+            RebuildUi();
+            return;
+        }
+
+        ScanDirectory();
+        if (singleViewMode)
+        {
+            ClearGallery();
+            EnsureGalleryFiles();
+            currentSingleFile = !String.IsNullOrWhiteSpace(preferredFile) && galleryFiles.Contains(preferredFile, StringComparer.OrdinalIgnoreCase)
+                ? preferredFile : galleryFiles.FirstOrDefault();
+            if (String.IsNullOrWhiteSpace(currentSingleFile))
+            {
+                singleViewMode = false;
+                RebuildUi();
+                return;
+            }
+            fitSingleImage = true;
+            RebuildUi();
+            ShowPhotoInfo(currentSingleFile);
+            return;
+        }
+
+        currentSingleFile = preferredFile;
+        RefreshGallery();
+        RestoreGridCurrentPhoto();
+    }
+
     private void ClearGallery()
     {
         galleryThumbnailLoadVersion++;
@@ -2018,8 +2245,7 @@ internal sealed class MainWindow : Window
         selectionAnchor = null;
         recycleSelectedButton.IsHitTestVisible = false;
         recycleSelectedButton.Opacity = 0.52;
-        recycleRejectedButton.IsHitTestVisible = rejectedFiles.Count > 0;
-        recycleRejectedButton.Opacity = rejectedFiles.Count > 0 ? 1.0 : 0.52;
+        UpdateRejectedButtonState();
         photoInfoTitle.Text = "照片信息";
         photoInfo.Text = "点击缩略图查看拍摄信息";
         UpdateCullProgress();
@@ -2170,35 +2396,29 @@ internal sealed class MainWindow : Window
 
     private string MarkLabel(string file)
     {
-        var parts = new List<string>();
-        if (pickedFiles.Contains(file)) parts.Add("P");
-        if (rejectedFiles.Contains(file)) parts.Add("X");
-        return String.Join(" ", parts.ToArray());
+        return DecisionOf(file);
     }
 
     private ContextMenu BuildTileMenu(string file)
     {
         var menu = new ContextMenu { Background = Brush("#FFFFFF"), Foreground = Brush("#1F2937"), Padding = new Thickness(0), BorderBrush = Brush("#D9E2EC"), BorderThickness = new Thickness(1) };
-        var open = new MenuItem { Header = "打开原图" };
-        StyleContextMenuItem(open);
-        open.Click += delegate { OpenPhoto(file); };
-        menu.Items.Add(open);
-        var pick = new MenuItem { Header = "标记为保留 (P)" };
-        StyleContextMenuItem(pick);
-        pick.Click += delegate { TogglePick(file); };
-        menu.Items.Add(pick);
-        var reject = new MenuItem { Header = "标记为废片 (X)" };
+        StyleFolderHistoryMenu(menu);
+        var reject = new MenuItem { Header = "标记为废片" };
         StyleContextMenuItem(reject);
         reject.Click += delegate { ToggleReject(file); };
         menu.Items.Add(reject);
-        var deleteJpg = new MenuItem { Header = "删除 JPG" };
-        StyleContextMenuItem(deleteJpg);
-        deleteJpg.Click += delegate { RecycleJpgOnly(file); };
-        menu.Items.Add(deleteJpg);
-        var deletePair = new MenuItem { Header = "删除 JPG + 同名 ARW" };
-        StyleContextMenuItem(deletePair);
-        deletePair.Click += delegate { RecycleSinglePair(file); };
-        menu.Items.Add(deletePair);
+        var pick = new MenuItem { Header = "保留双格式" };
+        StyleContextMenuItem(pick);
+        pick.Click += delegate { TogglePick(file); };
+        menu.Items.Add(pick);
+        var keepJpg = new MenuItem { Header = "保留 JPG" };
+        StyleContextMenuItem(keepJpg);
+        keepJpg.Click += delegate { ToggleDecision(file, "J", false); };
+        menu.Items.Add(keepJpg);
+        var keepRaw = new MenuItem { Header = "保留 RAW" };
+        StyleContextMenuItem(keepRaw);
+        keepRaw.Click += delegate { ToggleDecision(file, "R", false); };
+        menu.Items.Add(keepRaw);
         return menu;
     }
 
@@ -2247,7 +2467,7 @@ internal sealed class MainWindow : Window
         UpdateTileSelectionAppearance();
         recycleSelectedButton.IsHitTestVisible = selectedFiles.Count > 0;
         recycleSelectedButton.Opacity = selectedFiles.Count > 0 ? 1.0 : 0.52;
-        galleryCaption.Text = selectedFiles.Count > 0 ? "已选择 " + selectedFiles.Count + " 张 · 将配对 ARW 一并移至回收站" : tileFiles.Count + " 张 JPG · 单击选择，双击打开原图";
+        galleryCaption.Text = selectedFiles.Count > 0 ? "已选择 " + selectedFiles.Count + " 张 · 可批量标记废片" : tileFiles.Count + " 张 JPG · 单击选择，双击单张浏览";
     }
 
     private void RestoreGridCurrentPhoto()
@@ -2310,6 +2530,12 @@ internal sealed class MainWindow : Window
             e.Handled = true;
             return;
         }
+        if (e.Key == Key.J || e.Key == Key.R)
+        {
+            ToggleDecision(active, e.Key == Key.J ? "J" : "R", true);
+            e.Handled = true;
+            return;
+        }
     }
 
     private string ActivePhotoFile()
@@ -2345,7 +2571,7 @@ internal sealed class MainWindow : Window
             var candidateIndex = (index + step * offset) % galleryFiles.Count;
             if (candidateIndex < 0) candidateIndex += galleryFiles.Count;
             var candidate = galleryFiles[candidateIndex];
-            if (!pickedFiles.Contains(candidate) && !rejectedFiles.Contains(candidate) && File.Exists(candidate))
+            if (!IsDecided(candidate) && File.Exists(candidate))
                 return candidate;
         }
         return null;
@@ -2371,14 +2597,26 @@ internal sealed class MainWindow : Window
         EnsureGalleryFiles();
         if (galleryFiles.Count == 0) return;
         var active = selectedFiles.FirstOrDefault();
+        if (advanceToUndecided && active != null)
+        {
+            var next = UndecidedPhotoInDirection(active, direction);
+            if (next == null) { SetStatus("没有其他未决定照片。", false); return; }
+            SelectGridFile(next);
+            return;
+        }
         var index = galleryFiles.FindIndex(item => String.Equals(item, active, StringComparison.OrdinalIgnoreCase));
         if (index < 0) index = direction > 0 ? -1 : 0;
         index = (index + direction + galleryFiles.Count) % galleryFiles.Count;
+        SelectGridFile(galleryFiles[index]);
+    }
+
+    private void SelectGridFile(string file)
+    {
         selectedFiles.Clear();
-        selectedFiles.Add(galleryFiles[index]);
-        currentSingleFile = galleryFiles[index];
-        selectionAnchor = tileFiles.FirstOrDefault(item => String.Equals(item.Value, galleryFiles[index], StringComparison.OrdinalIgnoreCase)).Key;
-        ShowPhotoInfo(galleryFiles[index]);
+        selectedFiles.Add(file);
+        currentSingleFile = file;
+        selectionAnchor = tileFiles.FirstOrDefault(item => String.Equals(item.Value, file, StringComparison.OrdinalIgnoreCase)).Key;
+        ShowPhotoInfo(file);
         UpdateTileSelectionAppearance();
         recycleSelectedButton.IsHitTestVisible = true;
         recycleSelectedButton.Opacity = 1.0;
@@ -2386,20 +2624,33 @@ internal sealed class MainWindow : Window
 
     private void TogglePick(string file, bool advanceRequested = false)
     {
-        var becameUndecided = pickedFiles.Contains(file);
-        if (becameUndecided) pickedFiles.Remove(file);
-        else { pickedFiles.Add(file); rejectedFiles.Remove(file); }
-        SaveCullMarks();
-        ApplyCullChange(file, "保留旗标已更新。", advanceRequested, becameUndecided);
+        ToggleDecision(file, "P", advanceRequested);
     }
 
     private void ToggleReject(string file, bool advanceRequested = false)
     {
-        var becameUndecided = rejectedFiles.Contains(file);
-        if (becameUndecided) rejectedFiles.Remove(file);
-        else { rejectedFiles.Add(file); pickedFiles.Remove(file); }
-        SaveCullMarks();
-        ApplyCullChange(file, "废片旗标已更新。可点击“移除所有废片”统一清理。", advanceRequested, becameUndecided);
+        ToggleDecision(file, "X", advanceRequested);
+    }
+
+    private void ToggleDecision(string file, string decision, bool advanceRequested)
+    {
+        if (cullMarksReadFailed || !File.Exists(file)) return;
+        var previous = DecisionOf(file);
+        var becameUndecided = previous == decision;
+        if (!becameUndecided && (decision == "P" || decision == "R"))
+        {
+            var root = RootFolder(false);
+            var partners = root == null ? new List<string>() : FilesIn(Path.Combine(root, "arw")).Where(IsRaw)
+                .Where(raw => String.Equals(Stem(raw), Stem(file), StringComparison.OrdinalIgnoreCase)).ToList();
+            if (partners.Count != 1)
+            {
+                MessageBox.Show("没有找到唯一的同名 RAW。请先进行文件对应检查；仅有 JPG 时可选择 J。", "无法保留 RAW", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+        }
+        SetDecision(file, becameUndecided ? "" : decision);
+        if (!SaveCullMarks()) { SetDecision(file, previous); return; }
+        ApplyCullChange(file, "决定已更新；执行清理前不会移动文件。", advanceRequested, becameUndecided);
     }
 
     private void ApplyCullChange(string file, string message, bool advanceRequested, bool becameUndecided)
@@ -2408,7 +2659,7 @@ internal sealed class MainWindow : Window
         var cullingFilter = activeFilter == "all" || activeFilter == "undecided";
         var shouldAdvance = advanceRequested && !becameUndecided && cullingFilter;
         var completed = shouldAdvance && galleryFiles.Count > 0
-                     && galleryFiles.All(item => pickedFiles.Contains(item) || rejectedFiles.Contains(item));
+                     && galleryFiles.All(IsDecided);
         var nextFile = shouldAdvance && !completed
             ? (advanceToUndecided ? NextUndecidedPhoto(file) : NextPhotoInCurrentSort(file))
             : null;
@@ -2446,18 +2697,29 @@ internal sealed class MainWindow : Window
             }
             else singleViewer.ContextMenu = BuildTileMenu(currentSingleFile);
         }
-        else RebuildUi();
+        else
+        {
+            // A mark changes only culling state. Rebuilding the whole window would
+            // rescan the folder and recreate every shell control for no benefit.
+            RefreshGallery();
+            currentSingleFile = targetFile;
+            RestoreGridCurrentPhoto();
+        }
         if (completed)
         {
-            var picked = galleryFiles.Count(pickedFiles.Contains);
+            var completedRaw = CompletedRawOnlyInRoot(RootFolder(false)).Count;
+            var picked = galleryFiles.Count(IsKept) + completedRaw;
             var rejected = galleryFiles.Count(rejectedFiles.Contains);
-            var total = galleryFiles.Count;
+            var total = galleryFiles.Count + completedRaw;
             message = "所有照片均已完成去留标记。";
             SetStatus(message, false);
             MessageBox.Show(
                 "已决定 " + total.ToString("N0") + " / " + total.ToString("N0") + "\n" +
                 "保留 " + picked.ToString("N0") + "\n" +
-                "废片 " + rejected.ToString("N0"),
+                "废片 " + rejected.ToString("N0") + "\n\n" +
+                "双格式 " + galleryFiles.Count(pickedFiles.Contains).ToString("N0") + "\n" +
+                "仅 JPG " + galleryFiles.Count(jpgOnlyFiles.Contains).ToString("N0") + "\n" +
+                "仅 RAW " + (galleryFiles.Count(rawOnlyFiles.Contains) + completedRaw).ToString("N0") + "\n\n点击“执行清理”后确认处理文件。",
                 "挑片完成", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
@@ -2661,8 +2923,14 @@ internal sealed class MainWindow : Window
         if (TryGetAnyCachedThumbnail(file, out cached, out cachedWidth) && cachedWidth >= decodePixelWidth)
             return cached;
 
-        var loaded = LoadOrientedJpeg(file, decodePixelWidth);
-        return CacheThumbnail(file, decodePixelWidth, loaded);
+        if (TryLoadPersistentThumbnail(file, out cached))
+            return CacheThumbnail(file, PersistentThumbnailWidth, cached);
+
+        var targetWidth = Math.Max(PersistentThumbnailWidth, decodePixelWidth);
+        var loaded = LoadOrientedJpeg(file, targetWidth);
+        var result = CacheThumbnail(file, targetWidth, loaded);
+        SavePersistentThumbnail(file, result);
+        return result;
     }
 
     private BitmapSource LoadEmbeddedThumbnail(string file)
@@ -2671,8 +2939,68 @@ internal sealed class MainWindow : Window
         int cachedWidth;
         if (TryGetAnyCachedThumbnail(file, out cached, out cachedWidth) && cachedWidth >= 160)
             return cached;
+        if (TryLoadPersistentThumbnail(file, out cached))
+            return CacheThumbnail(file, PersistentThumbnailWidth, cached);
         LoadGalleryMetadata(file);
         return TryGetAnyCachedThumbnail(file, out cached, out cachedWidth) ? cached : null;
+    }
+
+    private static string PersistentThumbnailPath(string file)
+    {
+        var stamp = FileStamp(file);
+        if (stamp == null) return null;
+        var identity = Path.GetFullPath(file).ToUpperInvariant() + "|" + stamp;
+        using (var hash = SHA256.Create())
+        {
+            var bytes = hash.ComputeHash(Encoding.UTF8.GetBytes(identity));
+            return Path.Combine(ThumbnailCacheDirectory, BitConverter.ToString(bytes).Replace("-", String.Empty) + ".png");
+        }
+    }
+
+    private static bool TryLoadPersistentThumbnail(string file, out BitmapSource image)
+    {
+        image = null;
+        try
+        {
+            var cacheFile = PersistentThumbnailPath(file);
+            if (cacheFile == null || !File.Exists(cacheFile)) return false;
+            var bitmap = new BitmapImage();
+            bitmap.BeginInit();
+            bitmap.UriSource = new Uri(cacheFile, UriKind.Absolute);
+            bitmap.CacheOption = BitmapCacheOption.OnLoad;
+            bitmap.CreateOptions = BitmapCreateOptions.IgnoreColorProfile;
+            bitmap.EndInit();
+            bitmap.Freeze();
+            File.SetLastWriteTimeUtc(cacheFile, DateTime.UtcNow);
+            image = bitmap;
+            return true;
+        }
+        catch { return false; }
+    }
+
+    private static void SavePersistentThumbnail(string file, BitmapSource image)
+    {
+        if (image == null) return;
+        string temporary = null;
+        try
+        {
+            var cacheFile = PersistentThumbnailPath(file);
+            if (cacheFile == null || File.Exists(cacheFile)) return;
+            Directory.CreateDirectory(ThumbnailCacheDirectory);
+            temporary = cacheFile + ".tmp-" + Guid.NewGuid().ToString("N");
+            using (var stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            {
+                var encoder = new PngBitmapEncoder();
+                encoder.Frames.Add(BitmapFrame.Create(image));
+                encoder.Save(stream);
+            }
+            if (!File.Exists(cacheFile)) File.Move(temporary, cacheFile);
+            else File.Delete(temporary);
+        }
+        catch
+        {
+            try { if (temporary != null && File.Exists(temporary)) File.Delete(temporary); } catch { }
+        }
     }
 
     private BitmapSource CacheThumbnail(string file, int decodePixelWidth, BitmapSource loaded)
@@ -2750,7 +3078,33 @@ internal sealed class MainWindow : Window
             thumbnailCache.Clear();
             thumbnailCacheLru.Clear();
         }
-        lock (captureDateCacheLock) captureDateCache.Clear();
+        // Capture dates are stamp-validated and safely reusable across folder switches.
+        // Keeping them avoids re-reading EXIF for every photo when returning to a folder.
+    }
+
+    private void RemoveImageCachesForPaths(IEnumerable<string> paths)
+    {
+        foreach (var path in paths.Where(IsJpg).Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            lock (fullImageCacheLock)
+            {
+                fullImageCache.Remove(path);
+                fullImageLoadTasks.Remove(path);
+                var node = fullImageCacheLru.Find(path);
+                if (node != null) fullImageCacheLru.Remove(node);
+            }
+            lock (thumbnailCacheLock)
+            {
+                thumbnailCache.Remove(path);
+                var node = thumbnailCacheLru.Find(path);
+                if (node != null) thumbnailCacheLru.Remove(node);
+            }
+            lock (captureDateCacheLock)
+            {
+                captureDateCache.Remove(path);
+                captureDateStampCache.Remove(path);
+            }
+        }
     }
 
     private void SingleViewerMouseWheel(object sender, MouseWheelEventArgs e)
@@ -2874,164 +3228,347 @@ internal sealed class MainWindow : Window
         catch (Exception ex) { MessageBox.Show(ex.Message, "无法打开照片", MessageBoxButton.OK, MessageBoxImage.Error); }
     }
 
-    private void RecycleJpgOnly(string jpg)
+    private sealed class CleanupItem
     {
-        if (!File.Exists(jpg)) return;
-        var message = "将把 “" + Path.GetFileName(jpg) + "” 移到 Windows 回收站。\nARW 会保留，可稍后使用“检查配对”清理。\n\n确定继续吗？";
-        if (MessageBox.Show(message, "确认删除 JPG", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes) return;
-        var result = RecycleFiles(new[] { jpg });
-        RefreshCurrentFolder();
-        ShowRecycleResult(result.Item1, result.Item2);
+        public string Jpg;
+        public string Raw;
+        public string Decision;
+        public string JpgStamp;
+        public string RawStamp;
     }
 
-    private void RecycleSinglePair(string jpg)
+    private sealed class CleanupPlan
     {
-        var root = RootFolder(true);
-        if (root == null || !File.Exists(jpg)) return;
-        var targets = new List<string> { jpg };
-        string raw;
-        var hasRaw = RawByStem(Path.Combine(root, "arw")).TryGetValue(Stem(jpg), out raw) && File.Exists(raw);
-        if (hasRaw) targets.Add(raw);
-        var message = "将把 “" + Path.GetFileName(jpg) + "”" + (hasRaw ? " 及同名 ARW" : "（没有找到同名 ARW）") + " 移到 Windows 回收站。\n\n确定继续吗？";
-        if (MessageBox.Show(message, "确认删除照片", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes) return;
-        var result = RecycleFiles(targets);
-        RefreshCurrentFolder();
-        ShowRecycleResult(result.Item1, result.Item2);
+        public string Root;
+        public readonly List<CleanupItem> Items = new List<CleanupItem>();
+        public readonly List<string> Issues = new List<string>();
+    }
+
+    private sealed class CorrespondenceReport
+    {
+        public int Paired;
+        public int JpgOnly;
+        public int RawOnly;
+        public int UnrecordedSingles;
+        public readonly List<string> Issues = new List<string>();
+    }
+
+    private static bool InFolder(string file, string folder)
+    {
+        return String.Equals(Path.GetDirectoryName(Path.GetFullPath(file)),
+            Path.GetFullPath(folder).TrimEnd(Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string FileStamp(string file)
+    {
+        if (String.IsNullOrEmpty(file) || !File.Exists(file)) return null;
+        var info = new FileInfo(file);
+        return info.Length.ToString(CultureInfo.InvariantCulture) + ":" + info.LastWriteTimeUtc.Ticks.ToString(CultureInfo.InvariantCulture);
+    }
+
+    private static bool HasReparsePoint(string file)
+    {
+        return (File.GetAttributes(file) & FileAttributes.ReparsePoint) != 0;
+    }
+
+    private List<string> CompletedRawOnlyInRoot(string root)
+    {
+        if (String.IsNullOrWhiteSpace(root)) return new List<string>();
+        var jpgStems = new HashSet<string>(FilesIn(Path.Combine(root, "jpg")).Where(IsJpg).Select(Stem), StringComparer.OrdinalIgnoreCase);
+        return FilesIn(Path.Combine(root, "arw")).Where(IsRaw)
+            .Where(raw => retainedRawFiles.Contains(raw) && !jpgStems.Contains(Stem(raw))).ToList();
+    }
+
+    private CleanupPlan BuildCleanupPlan(string root)
+    {
+        var plan = new CleanupPlan { Root = Path.GetFullPath(root) };
+        var jpgFolder = Path.Combine(plan.Root, "jpg");
+        var rawFolder = Path.Combine(plan.Root, "arw");
+        if ((Directory.Exists(jpgFolder) && HasReparsePoint(jpgFolder)) ||
+            (Directory.Exists(rawFolder) && HasReparsePoint(rawFolder)))
+        {
+            plan.Issues.Add("jpg / arw 是链接目录，请选择实际照片目录后重新检查。");
+            return plan;
+        }
+        var jpgs = FilesIn(jpgFolder).Where(IsJpg).ToList();
+        var rawGroups = FilesIn(rawFolder).Where(IsRaw).GroupBy(Stem, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.ToList(), StringComparer.OrdinalIgnoreCase);
+        foreach (var group in jpgs.GroupBy(Stem, StringComparer.OrdinalIgnoreCase))
+        {
+            var marked = group.Where(file => new[] { "J", "R", "X" }.Contains(DecisionOf(file))).ToList();
+            if (marked.Count == 0) continue;
+            List<string> raws;
+            if (!rawGroups.TryGetValue(group.Key, out raws)) raws = new List<string>();
+            if (group.Count() != 1 || raws.Count > 1)
+            {
+                plan.Issues.Add(group.Key + "：同名主体存在多个文件，未加入清理。");
+                continue;
+            }
+            var jpg = marked[0];
+            var raw = raws.FirstOrDefault();
+            var decision = DecisionOf(jpg);
+            if (HasReparsePoint(jpg) || (raw != null && HasReparsePoint(raw)))
+            {
+                plan.Issues.Add(group.Key + "：文件是链接，未加入清理。");
+                continue;
+            }
+            if (decision == "R" && raw == null)
+            {
+                plan.Issues.Add(group.Key + "：选择仅 RAW，但 RAW 不存在，JPG 已保护。");
+                continue;
+            }
+            if (decision == "J" && raw == null) continue;
+            plan.Items.Add(new CleanupItem { Jpg = jpg, Raw = raw, Decision = decision, JpgStamp = FileStamp(jpg), RawStamp = FileStamp(raw) });
+        }
+        return plan;
     }
 
     private void RecycleSelectedPairs(object sender, RoutedEventArgs e)
     {
-        if (selectedFiles.Count == 0) return;
-        var root = RootFolder(true);
+        if (cullMarksReadFailed) return;
+        var root = RootFolder(false);
         if (root == null) return;
-        var rawByStem = RawByStem(Path.Combine(root, "arw"));
-        var targets = new List<string>();
-        var paired = 0;
-        foreach (var jpg in selectedFiles)
+        var files = FilesIn(Path.Combine(root, "jpg")).Where(IsJpg).Where(selectedFiles.Contains).ToList();
+        if (files.Count == 0) return;
+        var previous = files.ToDictionary(file => file, DecisionOf, StringComparer.OrdinalIgnoreCase);
+        foreach (var file in files) SetDecision(file, "X");
+        if (!SaveCullMarks())
         {
-            if (File.Exists(jpg)) targets.Add(jpg);
-            string raw;
-            if (rawByStem.TryGetValue(Stem(jpg), out raw) && File.Exists(raw)) { targets.Add(raw); paired++; }
+            foreach (var item in previous) SetDecision(item.Key, item.Value);
+            return;
         }
-        var message = "将把 " + selectedFiles.Count + " 张选中的 JPG 和 " + paired + " 个同名 ARW 移到 Windows 回收站。\n\n文件可以从回收站恢复。确定继续吗？";
-        if (MessageBox.Show(message, "确认淘汰选中照片", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes) return;
-        var result = RecycleFiles(targets);
-        RefreshGallery();
-        ScanDirectory();
-        ShowRecycleResult(result.Item1, result.Item2);
+        var active = currentSingleFile;
+        if (singleViewMode)
+        {
+            UpdateSingleCullStatus();
+            UpdateCullProgress();
+        }
+        else
+        {
+            RefreshGallery();
+            currentSingleFile = active;
+            RestoreGridCurrentPhoto();
+        }
+        SetStatus("已将 " + files.Count + " 张选中照片标记为废片；执行清理前不会移动文件。", false);
     }
 
     private void RecycleRejectedPairs(object sender, RoutedEventArgs e)
     {
         var root = RootFolder(true);
-        if (root == null) return;
-        var targetsJpg = rejectedFiles.Where(File.Exists).ToList();
-        if (targetsJpg.Count == 0)
+        if (root == null || cullMarksReadFailed) return;
+        var plan = BuildCleanupPlan(root);
+        if (plan.Items.Count == 0)
         {
-            MessageBox.Show("还没有标记为废片的 JPG。按 X 或 Delete 可标记废片。", "没有废片", MessageBoxButton.OK, MessageBoxImage.Information);
+            MessageBox.Show("当前目录没有待执行的 J / R / X 清理。" +
+                (plan.Issues.Count > 0 ? "\n\n" + String.Join("\n", plan.Issues.Take(8)) : ""),
+                "无需清理", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
-        var rawByStem = RawByStem(Path.Combine(root, "arw"));
-        var targets = new List<string>();
-        var paired = 0;
-        foreach (var jpg in targetsJpg)
+        var jpgCountToRecycle = plan.Items.Count(item => item.Decision == "R" || item.Decision == "X");
+        var rawCountToRecycle = plan.Items.Count(item => item.Raw != null && (item.Decision == "J" || item.Decision == "X"));
+        var message = "当前目录：\n" + plan.Root + "\n\n" +
+            "J 仅 JPG：" + plan.Items.Count(item => item.Decision == "J") + " 张，回收对应 RAW\n" +
+            "R 仅 RAW：" + plan.Items.Count(item => item.Decision == "R") + " 张，回收对应 JPG\n" +
+            "X 废片：" + plan.Items.Count(item => item.Decision == "X") + " 张，回收 JPG 与 RAW\n\n" +
+            "共移入 Windows 回收站：JPG " + jpgCountToRecycle + " 个，RAW " + rawCountToRecycle + " 个。\n" +
+            "P 和未决定照片保持原样。文件可从回收站恢复。\n" +
+            (plan.Issues.Count > 0 ? "\n跳过以下异常：\n" + String.Join("\n", plan.Issues.Take(8)) + "\n" : "") +
+            "\n确定执行清理吗？";
+        if (MessageBox.Show(message, "确认执行清理", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes) return;
+        EnsureGalleryFiles();
+        var orderedBefore = galleryFiles.ToList();
+        if (orderedBefore.Count == 0)
+            orderedBefore = SortGalleryFiles(FilesIn(Path.Combine(root, "jpg")).Where(IsJpg));
+        var activeBefore = ActivePhotoFile();
+        var result = ExecuteCleanupPlan(plan, MoveToRecycleBin, SaveCullMarks);
+        var preferred = PreferredPhotoAfterCleanup(orderedBefore, activeBefore, result.SuccessPaths);
+        RemoveImageCachesForPaths(result.SuccessPaths);
+        RefreshAfterCleanup(preferred);
+        ShowRecycleResult(result);
+    }
+
+    private RecycleResult ExecuteCleanupPlan(CleanupPlan plan, Func<string, bool> recycle, Func<bool> persist)
+    {
+        var result = new RecycleResult();
+        if (!persist()) { result.Notes.Add("无法保存决定，本次未开始清理。"); return result; }
+        foreach (var item in plan.Items)
         {
-            targets.Add(jpg);
-            string raw;
-            if (rawByStem.TryGetValue(Stem(jpg), out raw) && File.Exists(raw)) { targets.Add(raw); paired++; }
+            var current = BuildCleanupPlan(plan.Root).Items.FirstOrDefault(candidate =>
+                String.Equals(candidate.Jpg, item.Jpg, StringComparison.OrdinalIgnoreCase));
+            // Never act on a changed file/decision or on a path outside the confirmed root.
+            if (current == null || !String.Equals(current.Raw, item.Raw, StringComparison.OrdinalIgnoreCase) ||
+                !InFolder(item.Jpg, Path.Combine(plan.Root, "jpg")) ||
+                (item.Raw != null && !InFolder(item.Raw, Path.Combine(plan.Root, "arw"))) ||
+                DecisionOf(item.Jpg) != item.Decision ||
+                FileStamp(item.Jpg) != item.JpgStamp || FileStamp(item.Jpg) == null ||
+                FileStamp(item.Raw) != item.RawStamp ||
+                HasReparsePoint(item.Jpg) || (item.Raw != null && File.Exists(item.Raw) && HasReparsePoint(item.Raw)))
+            {
+                result.Notes.Add(Path.GetFileName(item.Jpg) + "：文件或决定已变化，本组未处理，请重新检查。");
+                continue;
+            }
+            var rawIntentAdded = false;
+            if (item.Decision == "R")
+            {
+                // Persist the survivor intent first so a process interruption after recycling
+                // the JPG cannot turn this RAW into an unexplained orphan.
+                if (item.Raw == null || !File.Exists(item.Raw))
+                {
+                    result.Notes.Add(Path.GetFileName(item.Jpg) + "：RAW 已不存在，JPG 已保护。");
+                    continue;
+                }
+                rawIntentAdded = retainedRawFiles.Add(item.Raw);
+                if (!persist())
+                {
+                    if (rawIntentAdded) retainedRawFiles.Remove(item.Raw);
+                    result.Notes.Add("无法保存 RAW 保留记录，清理已停止。");
+                    break;
+                }
+            }
+            var targets = new List<string>();
+            if (item.Decision == "J") targets.Add(item.Raw);
+            if (item.Decision == "R") targets.Add(item.Jpg);
+            if (item.Decision == "X")
+            {
+                // RAW first: a failed RAW recycle must leave its X-marked JPG for retry.
+                if (item.Raw != null) targets.Add(item.Raw);
+                targets.Add(item.Jpg);
+            }
+            foreach (var target in targets)
+            {
+                var attempt = RecycleFiles(new[] { target }, recycle);
+                result.SuccessPaths.AddRange(attempt.SuccessPaths);
+                result.FailedPaths.AddRange(attempt.FailedPaths);
+                RemoveCullMarksForSuccessfulJpgs(attempt.SuccessPaths);
+                foreach (var success in attempt.SuccessPaths.Where(IsRaw)) retainedRawFiles.Remove(success);
+                if (attempt.FailedPaths.Count > 0)
+                {
+                    if (item.Decision == "X" && target == item.Raw)
+                        result.Notes.Add(Path.GetFileName(item.Jpg) + "：RAW 回收失败，JPG 和 X 状态已保留。");
+                    break;
+                }
+            }
+            if (item.Decision == "R" && File.Exists(item.Jpg) && rawIntentAdded)
+                retainedRawFiles.Remove(item.Raw);
+            if (!persist())
+            {
+                result.Notes.Add("记录保存失败，后续清理已停止；请保留记录文件并重新检查。");
+                break;
+            }
         }
-        var message = "将把 " + targetsJpg.Count + " 张标记为废片的 JPG 与 " + paired + " 个同名 ARW 移到 Windows 回收站。\n\n文件可以从回收站恢复。确定继续吗？";
-        if (MessageBox.Show(message, "确认移除废片", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes) return;
-        var result = RecycleFiles(targets);
-        foreach (var jpg in targetsJpg)
+        return result;
+    }
+
+    private CorrespondenceReport InspectCorrespondence(string root)
+    {
+        var report = new CorrespondenceReport();
+        var jpgs = FilesIn(Path.Combine(root, "jpg")).Where(IsJpg).ToList();
+        var raws = FilesIn(Path.Combine(root, "arw")).Where(IsRaw).ToList();
+        var jpgGroups = jpgs.GroupBy(Stem, StringComparer.OrdinalIgnoreCase).ToDictionary(g => g.Key, g => g.ToList(), StringComparer.OrdinalIgnoreCase);
+        var rawGroups = raws.GroupBy(Stem, StringComparer.OrdinalIgnoreCase).ToDictionary(g => g.Key, g => g.ToList(), StringComparer.OrdinalIgnoreCase);
+        foreach (var stem in jpgGroups.Keys.Concat(rawGroups.Keys).Distinct(StringComparer.OrdinalIgnoreCase))
         {
-            rejectedFiles.Remove(jpg);
-            pickedFiles.Remove(jpg);
+            List<string> js, rs;
+            if (!jpgGroups.TryGetValue(stem, out js)) js = new List<string>();
+            if (!rawGroups.TryGetValue(stem, out rs)) rs = new List<string>();
+            if (js.Count > 1 || rs.Count > 1)
+            {
+                report.Issues.Add(stem + "：同名主体存在多个文件。");
+                continue;
+            }
+            if (js.Count == 1 && rs.Count == 1) report.Paired++;
+            else if (js.Count == 1)
+            {
+                report.JpgOnly++;
+                var decision = DecisionOf(js[0]);
+                if (decision == "P" || decision == "R") report.Issues.Add(stem + "：决定需要 RAW，但 RAW 缺失。");
+                else if (decision == "") report.UnrecordedSingles++;
+            }
+            else
+            {
+                report.RawOnly++;
+                if (!retainedRawFiles.Contains(rs[0])) report.UnrecordedSingles++;
+            }
         }
-        SaveCullMarks();
-        RefreshCurrentFolder();
-        ShowRecycleResult(result.Item1, result.Item2);
+        foreach (var file in pickedFiles.Concat(jpgOnlyFiles).Concat(rawOnlyFiles).Concat(rejectedFiles)
+            .Where(file => InFolder(file, Path.Combine(root, "jpg")) && !File.Exists(file)))
+        {
+            var expectedRawSurvived = rawOnlyFiles.Contains(file) && raws.Any(raw =>
+                retainedRawFiles.Contains(raw) && String.Equals(Stem(raw), Stem(file), StringComparison.OrdinalIgnoreCase));
+            if (!expectedRawSurvived) report.Issues.Add(Path.GetFileName(file) + "：仍有决定记录，但 JPG 已不存在。");
+        }
+        foreach (var raw in retainedRawFiles.Where(raw => InFolder(raw, Path.Combine(root, "arw")) && !File.Exists(raw)))
+            report.Issues.Add(Path.GetFileName(raw) + "：记录为仅 RAW 保留，但 RAW 已不存在。");
+        return report;
     }
 
     private void CheckMissingPairs(object sender, RoutedEventArgs e)
     {
         var root = RootFolder(true);
         if (root == null) return;
-        var missing = FindMissingPairs(root);
-        var jpgWithoutRaw = missing.Item1;
-        var rawWithoutJpg = missing.Item2;
-        if (jpgWithoutRaw.Count == 0 && rawWithoutJpg.Count == 0)
-        {
-            var pairs = FilesIn(Path.Combine(root, "jpg")).Count(IsJpg);
-            MessageBox.Show("已核对 " + pairs + " 组照片。\n\n每张 JPG 都有同名 ARW，每个 ARW 也都有同名 JPG。", "配对完整", MessageBoxButton.OK, MessageBoxImage.Information);
-            SetStatus("配对检查完成：JPG 与 ARW 一一对应。", false);
-            return;
-        }
-
-        var text = "JPG 缺少同名 ARW：" + jpgWithoutRaw.Count + " 张\n"
-                 + PairExamples(jpgWithoutRaw)
-                 + "\n\nARW 缺少同名 JPG：" + rawWithoutJpg.Count + " 个\n"
-                 + PairExamples(rawWithoutJpg);
-
-        if (rawWithoutJpg.Count == 0)
-        {
-            MessageBox.Show(text + "\n\n没有可清理的无主 ARW；本次检查不会移动或删除文件。", "发现缺失配对", MessageBoxButton.OK, MessageBoxImage.Warning);
-            SetStatus("配对检查：缺少 ARW 的 JPG " + jpgWithoutRaw.Count + " 张。", false);
-            return;
-        }
-
-        var question = text
-                     + "\n\n是否把这 " + rawWithoutJpg.Count + " 个无主 ARW 移到 Windows 回收站？"
-                     + "\n缺少 ARW 的 JPG 不会被处理。";
-        if (MessageBox.Show(question, "检查配对", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes)
-        {
-            SetStatus("配对检查：缺少 ARW 的 JPG " + jpgWithoutRaw.Count + " 张，无主 ARW " + rawWithoutJpg.Count + " 个。", false);
-            return;
-        }
-
-        var result = RecycleFiles(rawWithoutJpg);
-        RefreshCurrentFolder();
-        ShowRecycleResult(result.Item1, result.Item2);
+        var report = InspectCorrespondence(root);
+        var plan = BuildCleanupPlan(root);
+        var text = "完整配对：" + report.Paired + "\n仅 JPG：" + report.JpgOnly + "\n仅 RAW：" + report.RawOnly +
+            "\n异常：" + report.Issues.Count + "\n\n待执行清理：" + plan.Items.Count + " 组" +
+            "\n未记录保留意图的单格式：" + report.UnrecordedSingles +
+            "\n\nJ / R 主动保留的单格式属于正常结果。\n本次检查只报告，不移动文件。" +
+            (report.Issues.Count > 0 ? "\n\n" + String.Join("\n", report.Issues.Take(12)) : "") +
+            (plan.Issues.Count > 0 ? "\n\n清理保护：\n" + String.Join("\n", plan.Issues.Take(8)) : "");
+        MessageBox.Show(text, "文件检查完成", MessageBoxButton.OK,
+            report.Issues.Count > 0 ? MessageBoxImage.Warning : MessageBoxImage.Information);
     }
 
-    private static string PairExamples(List<string> files)
+    private static RecycleResult RecycleFiles(IEnumerable<string> files)
     {
-        if (files.Count == 0) return "无";
-        var examples = String.Join("\n", files.Take(6).Select(file => "• " + Path.GetFileName(file)).ToArray());
-        if (files.Count > 6) examples += "\n…另外 " + (files.Count - 6) + " 个";
-        return examples;
+        return RecycleFiles(files, MoveToRecycleBin);
     }
 
-    private static Tuple<List<string>, List<string>> FindMissingPairs(string root)
+    private static RecycleResult RecycleFiles(IEnumerable<string> files, Func<string, bool> recycleFile)
     {
-        var jpgs = FilesIn(Path.Combine(root, "jpg")).Where(IsJpg).ToList();
-        var raws = FilesIn(Path.Combine(root, "arw")).Where(IsRaw).ToList();
-        var jpgStems = new HashSet<string>(jpgs.Select(Stem), StringComparer.OrdinalIgnoreCase);
-        var rawStems = new HashSet<string>(raws.Select(Stem), StringComparer.OrdinalIgnoreCase);
-        var jpgWithoutRaw = jpgs.Where(file => !rawStems.Contains(Stem(file))).OrderBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase).ToList();
-        var rawWithoutJpg = raws.Where(file => !jpgStems.Contains(Stem(file))).OrderBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase).ToList();
-        return Tuple.Create(jpgWithoutRaw, rawWithoutJpg);
-    }
-
-    private static Tuple<int, List<string>> RecycleFiles(IEnumerable<string> files)
-    {
-        int completed = 0;
-        var failures = new List<string>();
+        var result = new RecycleResult();
         foreach (var file in files.Distinct(StringComparer.OrdinalIgnoreCase))
         {
-            if (!File.Exists(file)) continue;
-            if (MoveToRecycleBin(file)) completed++;
-            else failures.Add(Path.GetFileName(file));
+            if (!File.Exists(file))
+            {
+                result.FailedPaths.Add(file);
+                continue;
+            }
+
+            try
+            {
+                if (recycleFile(file)) result.SuccessPaths.Add(file);
+                else result.FailedPaths.Add(file);
+            }
+            catch { result.FailedPaths.Add(file); }
         }
-        return Tuple.Create(completed, failures);
+        return result;
     }
 
-    private void ShowRecycleResult(int completed, List<string> failures)
+    private bool RemoveCullMarksForSuccessfulJpgs(IEnumerable<string> successPaths)
     {
-        var text = "已移入 Windows 回收站：" + completed + " 个文件。";
-        if (failures.Count > 0) text += "\n\n无法处理 " + failures.Count + " 个：\n" + String.Join("\n", failures.Take(8).ToArray());
-        SetStatus(text.Split('\n')[0], failures.Count > 0);
-        MessageBox.Show(text, failures.Count > 0 ? "清理完成，但有错误" : "清理完成", MessageBoxButton.OK, failures.Count > 0 ? MessageBoxImage.Warning : MessageBoxImage.Information);
+        var changed = false;
+        foreach (var jpg in successPaths.Where(IsJpg).Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            changed |= pickedFiles.Remove(jpg);
+            changed |= rejectedFiles.Remove(jpg);
+            changed |= jpgOnlyFiles.Remove(jpg);
+            changed |= rawOnlyFiles.Remove(jpg);
+        }
+        return changed;
+    }
+
+    private void ShowRecycleResult(RecycleResult result)
+    {
+        var text = "已移入 Windows 回收站：" + result.SuccessPaths.Count + " 个文件。";
+        if (result.FailedPaths.Count > 0)
+        {
+            var failedNames = result.FailedPaths.Select(Path.GetFileName).Take(8).ToArray();
+            text += "\n\n无法处理 " + result.FailedPaths.Count + " 个：\n" + String.Join("\n", failedNames);
+        }
+        if (result.Notes.Count > 0) text += "\n\n" + String.Join("\n", result.Notes.Take(8));
+        var errors = result.FailedPaths.Count > 0 || result.Notes.Count > 0;
+        SetStatus(text.Split('\n')[0], errors);
+        MessageBox.Show(text, errors ? "清理部分完成，请检查" : "清理完成", MessageBoxButton.OK, errors ? MessageBoxImage.Warning : MessageBoxImage.Information);
     }
 
     private string RootFolder(bool notify)
@@ -3438,13 +3975,35 @@ internal sealed class MainWindow : Window
 
     private static void StyleContextMenuItem(MenuItem item)
     {
-        item.Height = 32;
+        item.Height = 34;
         item.Padding = new Thickness(12, 0, 14, 0);
-        item.Background = darkMode ? Brush("#242A31") : Brush("#FFFFFF");
-        item.Foreground = darkMode ? Brush("#F0F4F8") : Brush("#1F2937");
+        var normalBackground = darkMode ? Brush("#242A31") : Brush("#FFFFFF");
+        var normalForeground = darkMode ? Brush("#F0F4F8") : Brush("#1F2937");
+        var hoverBackground = darkMode ? Brush("#436794") : Brush("#D7E9FF");
+        var hoverForeground = darkMode ? Brushes.White : Brush("#17324D");
+        item.Background = normalBackground;
+        item.Foreground = normalForeground;
+        item.FontWeight = FontWeights.Normal;
+        item.FocusVisualStyle = null;
+        item.BorderBrush = Brushes.Transparent;
         item.BorderThickness = new Thickness(0);
+        item.SnapsToDevicePixels = true;
+        item.UseLayoutRounding = true;
+        item.MouseEnter += delegate
+        {
+            if (!item.IsEnabled) return;
+            item.Background = hoverBackground;
+            item.Foreground = hoverForeground;
+        };
+        item.MouseLeave += delegate
+        {
+            item.Background = normalBackground;
+            item.Foreground = normalForeground;
+        };
         var border = new FrameworkElementFactory(typeof(Border));
-        border.SetValue(Border.BackgroundProperty, item.Background);
+        border.SetValue(Border.BackgroundProperty, new TemplateBindingExtension(Control.BackgroundProperty));
+        border.SetValue(Border.CornerRadiusProperty, new CornerRadius(3));
+        border.SetValue(Border.MarginProperty, new Thickness(3, 1, 3, 1));
         var presenter = new FrameworkElementFactory(typeof(ContentPresenter));
         presenter.SetValue(ContentPresenter.ContentSourceProperty, "Header");
         presenter.SetValue(ContentPresenter.HorizontalAlignmentProperty, HorizontalAlignment.Stretch);

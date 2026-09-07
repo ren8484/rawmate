@@ -10,7 +10,7 @@ Program.Main
       ├─ 目录扫描/分类/配对
       ├─ 网格与缩略图延迟加载
       ├─ 单张图异步加载与 LRU 缓存
-      ├─ P/X 旗标和筛选排序
+      ├─ P/J/R/X 决定和筛选排序
       ├─ EXIF 方向与信息
       ├─ 设置/会话持久化
       └─ Windows 回收站 P/Invoke
@@ -38,7 +38,7 @@ UI 全由 `Build*` 方法程序化创建。切换网格/单张视图或应用筛
 1. 读取所选根目录顶层 JPG/JPEG/ARW。
 2. 读取 `root\jpg` 和 `root\arw` 顶层。
 3. 更新三个计数和目录提示。
-4. 按当前 `jpg` 文件夹中的有效照片计算 P+X 已决定进度和未决定数。
+4. 按当前 `jpg` 文件夹中的有效照片计算 P+J+R+X 已决定进度，并计入已完成的仅 RAW 结果。
 
 ### 分类
 
@@ -49,7 +49,7 @@ UI 全由 `Build*` 方法程序化创建。切换网格/单张视图或应用筛
 3. 创建 `jpg` / `arw`。
 4. `File.Move` 到对应目录。
 5. 同名存在或异常则跳过，绝不覆盖。
-6. 成功移动 JPG 时同步迁移 P/X 和当前照片状态。
+6. 成功移动 JPG/RAW 时同步迁移 P/J/R/X、仅 RAW 保留记录和当前照片状态。
 
 ### 取消分类
 
@@ -59,16 +59,11 @@ UI 全由 `Build*` 方法程序化创建。切换网格/单张视图或应用筛
 2. 在移动前检查根目录所有同名冲突；存在任一冲突则整体停止。
 3. 用户确认后逐个 `File.Move` 回根目录并记录失败项。
 4. 仅当 `jpg` / `arw` 完全为空时删除空文件夹。
-5. 成功还原 JPG 时同步迁移 P/X 和当前照片状态。
+5. 成功还原 JPG/RAW 时同步迁移挑片决定和当前照片状态。
 
-### 配对
+### 文件对应
 
-`Stem` 取文件名主体；所有集合使用 `StringComparer.OrdinalIgnoreCase`。`FindMissingPairs` 同时计算：
-
-- `jpgWithoutRaw`
-- `rawWithoutJpg`
-
-程序只允许清理第二类。
+`Stem` 取文件名主体；所有集合使用 `StringComparer.OrdinalIgnoreCase`。`InspectCorrespondence` 区分完整配对、仅 JPG、仅 RAW、未记录单格式和状态矛盾。J/R 清理主动形成的单格式是正常终态；检查只报告，不移动文件。
 
 ## 图像管线
 
@@ -80,7 +75,7 @@ UI 全由 `Build*` 方法程序化创建。切换网格/单张视图或应用筛
 - `BitmapSource.Freeze()` 允许跨线程传递。
 - EXIF Orientation 负责旋转/镜像。
 
-完整图缓存由字典 + LRU 链表管理，最多 5 张。当前图加载后预载前后照片，从而减少左右切换延迟。
+完整图缓存由字典 + LRU 链表管理，最多 3 张。当前图加载后预载下一张照片。缩略图除 512 项内存 LRU 外，还以“规范化绝对路径 + 文件大小 + 最后写入时间”生成哈希键写入共享持久缓存；源文件变化会自然失效。EXIF 拍摄时间同样按文件时间戳验证并持久化。
 
 ## 单张缩放
 
@@ -100,16 +95,19 @@ UI 全由 `Build*` 方法程序化创建。切换网格/单张视图或应用筛
 
 时间排序和照片信息通过 WIC 依次读取 EXIF `DateTimeOriginal`、`DateTimeDigitized` 和 `DateTime`；仅在三个字段均缺失或无效时作为“无拍摄时间”排列到末尾，不回退到文件修改时间。
 
-键盘挑片前进由 `NextUndecidedPhoto` 按完整图库和当前排序计算。在“全部 / 未决定”筛选下，从当前照片之后寻找第一张未决定照片，到末尾后从开头继续；“保留 / 废片”筛选只刷新复查结果。没有未决定照片时显示完成汇总，不触发文件清理。
+键盘挑片前进由 `NextUndecidedPhoto` 按完整图库和当前排序计算。在“全部 / 未决定”筛选下，从当前照片之后寻找第一张未决定照片，到末尾后从开头继续；“保留 / 废片”筛选只刷新复查结果。没有未决定照片时显示 P/J/R/X 完成汇总，不触发文件清理。
 
 ### 挑片数据
 
 内存中使用：
 
 - `pickedFiles: HashSet<string>`
+- `jpgOnlyFiles: HashSet<string>`
+- `rawOnlyFiles: HashSet<string>`
 - `rejectedFiles: HashSet<string>`
+- `retainedRawFiles: HashSet<string>`（R 清理完成后锚定仍存在的 RAW）
 
-退出和每次变更后写入 `cull-marks.txt`。加载时只接受 P/X；1.1.x 留下的旧 `R` 行或损坏的非 P/X 行会被逐行忽略，不影响后续有效 P/X。
+退出和每次变更后原子写入带版本头的 `cull-marks-v2.txt`。P/J/R/X 以 JPG 路径为决定锚点，K 以内存中的 `retainedRawFiles` 对应完成后的 RAW。旧 `cull-marks.txt` 只迁移 P/X，避免把历史版本中含义不同的 R 误读为“仅 RAW”。读取失败会阻止保存和清理，防止空状态覆盖可恢复记录。
 
 ## 回收站
 
@@ -121,7 +119,9 @@ UI 全由 `Build*` 方法程序化创建。切换网格/单张视图或应用筛
 - `FOF_SILENT`
 - `FOF_NOERRORUI`
 
-上层必须自己显示确认、统计成功和失败。不要把 `FOF_ALLOWUNDO` 移除。
+`BuildCleanupPlan` 只正向枚举当前 `root\jpg` 的 J/R/X，并只用当前 `root\arw` 建立唯一配对。确认后 `ExecuteCleanupPlan` 再校验根目录边界、链接、决定和文件时间戳。P 不动；J 回收 RAW；R 先持久化 RAW 保留意图再回收 JPG；X 先回收 RAW，成功后再回收 JPG。
+
+`RecycleFiles` 返回精确的 `SuccessPaths` 与 `FailedPaths`。成功 JPG 才清除其 JPG 锚定决定，失败项保留以便重试；部分 X 在 RAW 成功、JPG 失败时仍保留 X 锚点。清理后只淘汰成功移除文件的图像缓存，并按清理前排序进入当前照片之后的下一张幸存照片。不要移除 `FOF_ALLOWUNDO`。
 
 ## 未来可拆分方向
 
