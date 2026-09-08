@@ -2,7 +2,7 @@ name: Windows test build
 
 on:
   push:
-    branches: [main]
+    branches: [main, rawmate/test]
   pull_request:
   workflow_dispatch:
 

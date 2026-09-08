@@ -29,9 +29,9 @@ using Forms = System.Windows.Forms;
 [assembly: AssemblyCompany("ren8484")]
 [assembly: AssemblyProduct("RAWMate")]
 [assembly: AssemblyCopyright("Copyright © 2026 ren8484")]
-[assembly: AssemblyVersion("1.4.0.0")]
-[assembly: AssemblyFileVersion("1.4.0.0")]
-[assembly: AssemblyInformationalVersion("1.4.0")]
+[assembly: AssemblyVersion("1.4.1.0")]
+[assembly: AssemblyFileVersion("1.4.1.0")]
+[assembly: AssemblyInformationalVersion("1.4.1")]
 
 internal static class Program
 {
@@ -120,6 +120,7 @@ internal sealed class MainWindow : Window
     private string currentSingleFile;
     private bool singleViewMode;
     private bool advanceToUndecided = true;
+    private string navigationRoot;
     private bool buildingInitialShell;
     private bool fitSingleImage = true;
     private double singleZoom = 1.0;
@@ -792,10 +793,9 @@ internal sealed class MainWindow : Window
         {
             advanceToUndecided = !advanceToUndecided;
             UpdateAdvanceTargetButton();
-            SaveSettings();
             SetStatus(advanceToUndecided
-                ? "自动前进方式：跳到下一张未决定照片。"
-                : "自动前进方式：按当前排序跳到下一张照片。", false);
+                ? "已切换到“挑片”：前后导航只访问未决定照片。"
+                : "已切换到“浏览”：前后导航按当前排序逐张查看。", false);
         };
         return advanceTargetButton;
     }
@@ -1530,8 +1530,6 @@ internal sealed class MainWindow : Window
                     gallerySortMode = NormalizeSortMode(line.Substring(5));
                 else if (line.StartsWith("filter=", StringComparison.OrdinalIgnoreCase))
                     activeFilter = NormalizeFilter(line.Substring(7));
-                else if (line.StartsWith("advance_target=", StringComparison.OrdinalIgnoreCase))
-                    advanceToUndecided = !String.Equals(line.Substring(15), "next", StringComparison.OrdinalIgnoreCase);
                 else if (line.StartsWith("folder=", StringComparison.OrdinalIgnoreCase))
                 {
                     var folder = line.Substring(7);
@@ -1560,7 +1558,6 @@ internal sealed class MainWindow : Window
             lines.Add("grid_tile_width=" + gridTileWidth.ToString("0", CultureInfo.InvariantCulture));
             lines.Add("sort=" + gallerySortMode);
             lines.Add("filter=" + activeFilter);
-            lines.Add("advance_target=" + (advanceToUndecided ? "undecided" : "next"));
             if (!forgetFolderHistoryUntilNextScan)
                 lines.AddRange(recentFolders.Take(3).Select(folder => "folder=" + folder));
             File.WriteAllLines(settingsPath, lines);
@@ -1926,10 +1923,47 @@ internal sealed class MainWindow : Window
         catch { }
     }
 
+    private void InitializeNavigationForFolder(string root)
+    {
+        if (String.IsNullOrWhiteSpace(root))
+        {
+            navigationRoot = null;
+            advanceToUndecided = true;
+            UpdateAdvanceTargetButton();
+            return;
+        }
+
+        var fullRoot = Path.GetFullPath(root);
+        var pathRoot = Path.GetPathRoot(fullRoot);
+        var normalizedRoot = String.Equals(fullRoot, pathRoot, StringComparison.OrdinalIgnoreCase)
+            ? pathRoot
+            : fullRoot.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        if (String.Equals(navigationRoot, normalizedRoot, StringComparison.OrdinalIgnoreCase)) return;
+
+        navigationRoot = normalizedRoot;
+        // Navigation belongs to the current batch, not to a global preference.
+        // An empty batch starts in culling mode; a completed batch opens ready
+        // for sequential review.
+        advanceToUndecided = FolderStartsInCullMode(normalizedRoot);
+        UpdateAdvanceTargetButton();
+    }
+
+    private bool FolderStartsInCullMode(string root)
+    {
+        var jpgs = FilesIn(Path.Combine(root, "jpg")).Where(IsJpg).ToList();
+        return jpgs.Count == 0 || jpgs.Any(file => !IsDecided(file));
+    }
+
+    private static bool IsCullCompletionTransition(bool shouldAdvance, bool wasUndecided, int total, int undecidedAfter)
+    {
+        return shouldAdvance && wasUndecided && total > 0 && undecidedAfter == 0;
+    }
+
     private void ScanDirectory()
     {
         var root = RootFolder(false);
         if (root == null) return;
+        InitializeNavigationForFolder(root);
         RememberFolder(root);
         var topLevel = FilesIn(root).ToList();
         var pendingJpg = topLevel.Count(IsJpg);
@@ -2141,6 +2175,8 @@ internal sealed class MainWindow : Window
 
         if (root == null)
         {
+            navigationRoot = null;
+            advanceToUndecided = true;
             currentSingleFile = null;
             singleViewMode = false;
             RebuildUi();
@@ -2636,6 +2672,7 @@ internal sealed class MainWindow : Window
     {
         if (cullMarksReadFailed || !File.Exists(file)) return;
         var previous = DecisionOf(file);
+        var wasUndecided = previous.Length == 0;
         var becameUndecided = previous == decision;
         if (!becameUndecided && (decision == "P" || decision == "R"))
         {
@@ -2650,16 +2687,19 @@ internal sealed class MainWindow : Window
         }
         SetDecision(file, becameUndecided ? "" : decision);
         if (!SaveCullMarks()) { SetDecision(file, previous); return; }
-        ApplyCullChange(file, "决定已更新；执行清理前不会移动文件。", advanceRequested, becameUndecided);
+        ApplyCullChange(file, "决定已更新；执行清理前不会移动文件。", advanceRequested, wasUndecided, becameUndecided);
     }
 
-    private void ApplyCullChange(string file, string message, bool advanceRequested, bool becameUndecided)
+    private void ApplyCullChange(string file, string message, bool advanceRequested, bool wasUndecided, bool becameUndecided)
     {
         EnsureGalleryFiles();
         var cullingFilter = activeFilter == "all" || activeFilter == "undecided";
         var shouldAdvance = advanceRequested && !becameUndecided && cullingFilter;
-        var completed = shouldAdvance && galleryFiles.Count > 0
-                     && galleryFiles.All(IsDecided);
+        // Completion is a state transition, not merely the fact that the batch is
+        // currently at 100%. Reclassifying an already-decided photo must not show
+        // the completion dialog again.
+        var undecidedAfter = galleryFiles.Count(item => !IsDecided(item));
+        var completed = IsCullCompletionTransition(shouldAdvance, wasUndecided, galleryFiles.Count, undecidedAfter);
         var nextFile = shouldAdvance && !completed
             ? (advanceToUndecided ? NextUndecidedPhoto(file) : NextPhotoInCurrentSort(file))
             : null;
@@ -2667,7 +2707,14 @@ internal sealed class MainWindow : Window
         var advanceMessage = String.Empty;
 
         if (becameUndecided)
-            advanceMessage = " 当前照片已取消旗标并回到未决定。";
+        {
+            if (!advanceToUndecided)
+            {
+                var undecided = galleryFiles.Count(item => !IsDecided(item));
+                advanceMessage = " 当前有 " + undecided.ToString("N0") + " 张未决定照片，可切换到“挑片”继续处理。";
+            }
+            else advanceMessage = " 当前照片已取消旗标并回到未决定。";
+        }
         else if (shouldAdvance && !completed)
         {
             if (!String.IsNullOrWhiteSpace(nextFile) && File.Exists(nextFile))
@@ -2721,6 +2768,19 @@ internal sealed class MainWindow : Window
                 "仅 JPG " + galleryFiles.Count(jpgOnlyFiles.Contains).ToString("N0") + "\n" +
                 "仅 RAW " + (galleryFiles.Count(rawOnlyFiles.Contains) + completedRaw).ToString("N0") + "\n\n点击“执行清理”后确认处理文件。",
                 "挑片完成", MessageBoxButton.OK, MessageBoxImage.Information);
+            // A completed culling task becomes a review task. Keep the current
+            // photo in place; only the navigation semantics change after OK.
+            advanceToUndecided = false;
+            var restoreAllFilter = activeFilter == "undecided";
+            if (restoreAllFilter) activeFilter = "all";
+            UpdateAdvanceTargetButton();
+            if (restoreAllFilter && !singleViewMode)
+            {
+                RefreshGallery();
+                currentSingleFile = file;
+                RestoreGridCurrentPhoto();
+            }
+            SetStatus("挑片已完成，已切换到“浏览”；可用前后导航逐张复查。", false);
             return;
         }
         else message += advanceMessage;

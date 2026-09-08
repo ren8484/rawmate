@@ -28,6 +28,10 @@ internal static class CullModelTests
     {
         return obj.GetType().GetField(name, BindingFlags.Public | PrivateInstance).GetValue(obj);
     }
+    static void SetField(object obj, string name, object value)
+    {
+        obj.GetType().GetField(name, BindingFlags.Public | PrivateInstance).SetValue(obj, value);
+    }
     static object NewState(string stateFile)
     {
         var instance = FormatterServices.GetUninitializedObject(windowType);
@@ -108,6 +112,25 @@ internal static class CullModelTests
         Check((string)Call(state, "NextUndecidedPhoto", Jpg(root, "P")) == Jpg(root, "U"), "Forward navigation did not skip J/R");
         Check((string)Call(state, "PreviousUndecidedPhoto", Jpg(root, "X")) == Jpg(root, "U"), "Backward navigation did not skip J/R");
         Check((string)Call(state, "NextPhotoInCurrentSort", Jpg(root, "P")) == Jpg(root, "J"), "Browse mode skipped a decided photo");
+
+        var modeUndecided = Root("mode-undecided");
+        Pair(modeUndecided, "U");
+        Call(state, "InitializeNavigationForFolder", modeUndecided);
+        Check((bool)Field(state, "advanceToUndecided"), "Undecided folder did not start in culling mode");
+        var modeCompleted = Root("mode-completed");
+        Pair(modeCompleted, "P");
+        Mark(state, Jpg(modeCompleted, "P"), "P");
+        Call(state, "InitializeNavigationForFolder", modeCompleted);
+        Check(!(bool)Field(state, "advanceToUndecided"), "Completed folder did not start in browse mode");
+        SetField(state, "advanceToUndecided", true);
+        Call(state, "InitializeNavigationForFolder", modeCompleted);
+        Check((bool)Field(state, "advanceToUndecided"), "Same-folder refresh discarded the manual navigation mode");
+        var modeEmpty = Root("mode-empty");
+        Call(state, "InitializeNavigationForFolder", modeEmpty);
+        Check((bool)Field(state, "advanceToUndecided"), "Empty folder did not start in culling mode");
+        Check((bool)Call(state, "IsCullCompletionTransition", true, true, 1, 0), "Final undecided decision was not recognized as completion");
+        Check(!(bool)Call(state, "IsCullCompletionTransition", true, false, 4, 0), "A 100% reclassification retriggered completion");
+        Check(!(bool)Call(state, "IsCullCompletionTransition", true, true, 4, 1), "Incomplete batch was reported as complete");
 
         var navigation = Root("cleanup-navigation");
         foreach (var name in new[] { "A", "B", "C" }) Pair(navigation, name);
