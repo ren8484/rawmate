@@ -4,7 +4,9 @@
 
 ## [Unreleased]
 
-当前测试候选为 `1.4.1`，通过 `rawmate/test` 分支和 GitHub Actions 的 `RAWMate-Test` 构建产物提供测试；正式版仍为 `1.4.0`。
+暂无待发布变更。
+
+## [1.4.1] - 2026-09-12
 
 ### Changed
 

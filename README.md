@@ -4,9 +4,7 @@ RAWMate 是一款本地运行的 Windows JPG + RAW 照片去留筛选器。它�
 
 RAWMate 只负责决定照片留不留；挑完以后，可以继续处理 RAW，也可以直接使用 JPG。
 
-当前正式版本：`1.4.0`（Windows 文件版本 `1.4.0.0`）。
-
-当前测试候选：`1.4.1`，位于 `rawmate/test` 分支。该分支用于扩大照片样本测试，不代表正式发布；GitHub Actions 产物名称为 `RAWMate-Test`。
+当前正式版本：`1.4.1`（Windows 文件版本 `1.4.1.0`）。
 
 ## 一次挑片怎么走
 
