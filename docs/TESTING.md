@@ -8,6 +8,16 @@
 
 ## 1. 构建检查
 
+No-GPS-IFD 1.5 回归：`tests\Run-CreateGpsIfdTests.ps1 -Mode readonly -PairsPath <before|retained-temp|source 清单> -ExifToolPath <显式 exe> -OutputPath <test-output JSON>` 先只读跑九组完整生产验证、23 类及逐 typed payload/offset 负向检查，必须失败于预期安全类别，禁止 catch-all 冒充通过。全部通过后，`-Mode transactions` 使用全新 test-output working directory，覆盖真实 GpsFileTransaction、Grid executor、private mutation 阻断及继续下一张。另须运行 178 GPS / 61 Cull / 77 UX/Grid、JPG integration/evidence 与实际网格 UI；正式冒烟也只能使用独立 working copy。UX 原八类冻结测试仅更新经授权的 Adapter/JpgGpsIntegrity 两个 hash，六个其他类仍冻结；旧 ExistingGpsIfd MakerNotes 证明主体另行冻结。报告不得把 executor 测试写成已操作真实 UI。
+
+GPS UX / Grid 回归： `tests\Run-GpsUxGridTests.ps1`，覆盖设置/照片菜单、直接动作、来源身份/视图/root、三态 badge、选中分类、默认跳过/明确覆盖、单失败继续、取消剩余和底层八个安全类与写前快照逐字节等价。仍须运行 178 GPS / 61 Cull、真实 JPG 集成及独立 evidence tests。人工 UI 必须在新 test-output 实拍复制件上核验单张、三张多选、混合默认跳过、主动覆盖、设置唯一配置入口，保存截图；不得据编译或模拟测试宣称实际 UI PASS。
+
+GPS 性能回归：`tests\Run-GpsPerformanceTests.ps1 -Mode 3 -Label final` 仅写新 test-output 复制件；记录冷 baseline / 来源缓存两种路径的阶段计时与调用计数。`Run-GpsPerformanceSafetyTests.ps1 -WorkingJpgFolder <本轮实拍写后目录>` 验证 fingerprint 缓存、同 size/time 外部变化、新 file ID、外部 writer、session 锁失效、工具目录变化、合并/独立 binary 提取等价和写后临时文件再次改变的阻断。仍必须重新运行原 178 GPS / 61 Cull、JPG 集成和独立完整性证据脚本；不得用性能 PASS 替代安全 PASS。
+
+JPG GPS 回归先运行 `tests\Run-GpsModelTests.ps1 -ExifToolPath '<用户指定 13.59 exe>'`（模拟写入与真实工具只读探测），另运行 `tests\Run-CullModelTests.ps1`。实拍写入入口 `tests\Run-JpgGpsIntegrationTests.ps1` 仅创建新的 test-output working copy，不写冻结 baseline 或用户原片，不测试 ARW 写入。UI 核验必须实际启动固定 `RAWMate-Test.exe`，执行一次确认写入，并检查当前 GPS 立即更新、P/J/R/X/计数/导航/缩放未改变；DPI 未实测必须记 NOT TESTED。详见 [GPS_METADATA.md](GPS_METADATA.md)。
+
+历史只读诊断 `tests\Run-GpsRealFileTests.ps1` 的 probe/scan 不写文件；preflight 现仅复制来源/目标 JPG 并运行写前检查，不再枚举 RAW。历史 Phase 3B/3B.1 ARW FAIL 保留，不代表 JPG 候选支持 RAW。新完整性门禁拒绝所有 JPG Validate warning/error、未证明的 private/MakerNotes 差异；不得用忽略列表制造 PASS。
+
 ```bat
 BUILD_RAWMate-Test.cmd
 ```
@@ -140,6 +150,9 @@ test-data/
 
 ## 8.1 目录切换与刷新
 
+- `tests\Run-GpsDirectoryRefreshTests.ps1`：固定长度合成 JPG 外部 metadata 修改，覆盖无→有、有→无、来源坐标更新/无 GPS/删除/不可读、相同 Windows stamp、旧 generation 注入及连续刷新、root 隔离、手动清除不复活、选择/模式/排序/缩放/缓存保留、当前删除 fallback，以及 500 张后台扫描的 Dispatcher heartbeat。只修改新的 test-output 合成夹具，不使用生产 GPS 写入或完整性门禁。
+- 实机测试使用 test-output 实拍副本：外部工具加入/移除 GPS、改来源坐标，再点击原“刷新目录”，不重启，核验网格图标和单张坐标/来源。实机修改可恢复 mtime；全 identity 不变由合成测试独立覆盖。GPS Source > Has GPS > No GPS 的冻结图标设计不得变化。
+
 - 在单张视图浏览目录 A 的照片时切换到目录 B，应立即显示目录 B 当前排序后的第一张 JPG，标题、导航器、胶片条和 EXIF 均不得残留目录 A 的内容。
 - 在单张视图切换到没有 `jpg` 照片的目录时，应返回空图库，不继续显示旧照片。
 - 刷新同一个目录时，当前照片仍存在则继续显示；当前照片已不存在时改为显示当前排序后的第一张。
@@ -159,7 +172,7 @@ test-data/
 - 1080p 与 4K 下目录概览三个 `*` 列的标题和数量均围绕列中心对齐；分别用 2、25、258、1258、12345 等精确数量检查增长时不偏移列中心，短数字不放大，五位数仅在必要时等比收紧且不得缩写、重叠或裁切单位。目录/分类双列按钮不挤压文字，挑片进度数字与条内百分比完整显示；所有按钮保持 `#436794` 深蓝底且交互时不反转颜色。
 - 字重层级清楚：章节标题与按钮为半粗体，路径、目录提示和统计标签为常规字重；目录提示比路径小约 1px 且灰度更低。目录大数字保持半粗体；P/X 徽标与状态数字为半粗体，“保留 / 废片”为常规字重。
 - 4K 或高窗口下左侧内容必须从顶部开始，已删除的产品名/副标题区域不得以空白形式残留；多余空间位于左侧操作区下方。
-- 左下角版本号在默认、最大化和低高度窗口中均可见、不重叠；1.4.1 正式版的程序集信息版本为 `1.4.1`，界面显示 `V1.4.1`。
+- 左下角版本号在默认、最大化和低高度窗口中均可见、不重叠；1.5 正式版的程序集信息版本为 `1.5.0.0`，界面显示 `v1.5`。
 - 左侧进度标题为“已决定 / 总数”，下方只显示 `[P] 保留 数量`和`[X] 废片 数量`两个等宽 `*` 结果区；左项从左侧 12px 向右增长，右项从右侧 12px 向左增长。P/X 徽标固定 18×18、字母以半粗体双向居中；中文与数字必须在同一个 `TextBlock` 中使用相同字号和同一基线，中文为常规字重、数字为半粗体。使用一至五位精确数量检查不溢出、不缩写；不得使用固定坐标或出现 ✓、✕、○ 图标、未决定重复统计、整组状态块背景或多余挑片徽标。
 - 目录路径输入区与下拉按钮外轮廓完整圆角；进度条分别在 0%、中间值和 100% 时检查左右端圆角，不能出现方角或溢出。
 - 目标 Windows DPI。
@@ -167,6 +180,13 @@ test-data/
 任何滚动条、输入框、右键菜单、文字对比或方向问题都不能仅以“代码逻辑正确”判定通过。
 
 ## 10. 发布前记录
+
+### 1.5 显式冻结输入
+
+- `FreezeReleaseBaseline.cs` 仅从已验证 test-output 复制件冻结 ExistingGpsIfd 三张 JPG / 配对 RAW、九组 CreateGpsIfd before/after 与 source；所有 mutation 在内存或新副本上，不写 baseline。
+- `Verify-ReleaseBaseline.ps1` 必须按冻结 manifest SHA、每项 size/SHA 在测试开始/结束 PASS，不再运行旧 226 历史全图库保护作为 release blocker。历史 NOT PASS 审计保持原样。
+- Performance / integration / evidence runner 必须显式提供 `-BaselineRoot` 与 `-ExifToolPath`；integration 还需 `-CreateGpsIfdPairs`，evidence 需本轮 `-WorkingJpgFolder`。不依赖桌面路径或按文件名自动猜输入。
+- 本轮实际访问原片仍须开始 freeze、结束 recheck，确认没有 rawmate temp / journal / backup / XMP，ARW 不写入。
 
 在 PR/变更说明记录：
 

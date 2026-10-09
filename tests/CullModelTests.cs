@@ -38,7 +38,7 @@ internal static class CullModelTests
         foreach (var name in new[] { "pickedFiles", "rejectedFiles", "jpgOnlyFiles", "rawOnlyFiles", "retainedRawFiles", "selectedFiles" })
             windowType.GetField(name, PrivateInstance).SetValue(instance, new HashSet<string>(StringComparer.OrdinalIgnoreCase));
         windowType.GetField("galleryFiles", PrivateInstance).SetValue(instance, new List<string>());
-        foreach (var name in new[] { "thumbnailCache", "thumbnailCacheLru" })
+        foreach (var name in new[] { "thumbnailCache", "thumbnailCacheLru", "thumbnailStamps" })
         {
             var field = windowType.GetField(name, PrivateInstance);
             field.SetValue(instance, Activator.CreateInstance(field.FieldType));

@@ -2,6 +2,16 @@
 
 ## 1. 测试候选
 
+### 1.5 的当前保护基准
+
+发布必须使用专用 `test-output/release-baseline-1.5/` 冻结夹具，不能要求用户长期保留活跃图库。`release-baseline-1.5-manifest.json` 记录 relative path、size、SHA256、role、GPS state、相关结构；manifest 自身 SHA 单独绑定。`tests/Verify-ReleaseBaseline.ps1 -BaselineRoot <冻结目录> -ManifestSha256 <冻结 SHA>` 在开始/结束检查每项身份。baseline 不写入；GPS/mutation/evidence 只用新的 working copy，保留失败材料。
+
+旧 226 inventory 为 Historical / Retired Baseline，205 exact / 16 missing / 5 ARW mismatch 的 NOT PASS 结果保留为审计，不再作为发布 blocker；不删除、不覆盖、不修改旧 SHA，不证明损坏或 RAWMate 修改。
+
+本轮实际访问的真实原图库输入仍须 before/after SHA256 保护，确认无 temp/journal/backup/XMP 且 RAW unchanged。不能用历史退役取消本轮原片保护。
+
+1.5 全套重新运行：测试构建、178 GPS、77 UX/Grid、61 Cull、九组 CreateGpsIfd、837 negatives、18 positive controls、performance safety、JPG integration（Existing/Create/overwrite/failure/RAW/XMP）、independent evidence、performance、40 条 Refresh Directory、baseline/original protection、实际 Test UI，再文档/正式构建/正式 UI、Git audit/commit/main push/`v1.5`/Release/下载 asset SHA。任何当前核心门禁失败停止。
+
 1. 确认源码和文档已保存。
 2. 运行 `BUILD_RAWMate-Test.cmd`。
 3. 按 `docs/TESTING.md` 完成相关测试。

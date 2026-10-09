@@ -40,6 +40,12 @@ UI 全由 `Build*` 方法程序化创建。切换网格/单张视图或应用筛
 3. 更新三个计数和目录提示。
 4. 按当前 `jpg` 文件夹中的有效照片计算 P+J+R+X 已决定进度，并计入已完成的仅 RAW 结果。
 
+“刷新目录”在上述扫描后，通过 `BeginGpsDirectoryRefresh` 强制失效仅当前 `root\jpg` 的 GPS 显示缓存，并在单个后台 worker 复用 `ReadGpsDisplay` / WIC metadata-only 管线逐张读取；每 16 张通过 Dispatcher 更新。每次刷新及切 root 建立新 generation，旧普通 GPS 任务、旧批次结果和旧排序预读不能回填当前 UI。拍摄时间排序缺失缓存时保留既有后台 preload，不把 GPS 扫描变成 UI 线程逐张解码。
+
+`RefreshDirectoryView` 在文件列表未变时不重建视图；列表改变时保留仍存在的选中路径、当前照片和缩放/滚动，并沿用当前文件不存在时的 fallback。不再无条件调用 `ClearFullImageCache`；只有识别到具体文件 identity 变化时使用现有逐路径失效。其他目录的 GPS 缓存与未改变的图像缓存保留。
+
+刷新来源时后台构建新的 `GpsSourceSession`，沿用现有文件安全和 SHA256 身份绑定，但不运行写入/完整性门禁。监视器可先清除过期坐标，仅保留用户最后明确选过的来源路径作为下一次刷新候选；刷新后有效则采用最新坐标，无效则清空候选。用户手动清除、切 root 或换来源立即使旧候选/旧完成结果失效。候选不保存坐标、不持久化，也不能用于写入。
+
 ### 分类
 
 `OrganizeFiles`：
@@ -124,6 +130,10 @@ UI 全由 `Build*` 方法程序化创建。切换网格/单张视图或应用筛
 `RecycleFiles` 返回精确的 `SuccessPaths` 与 `FailedPaths`。成功 JPG 才清除其 JPG 锚定决定，失败项保留以便重试；部分 X 在 RAW 成功、JPG 失败时仍保留 X 锚点。清理后只淘汰成功移除文件的图像缓存，并按清理前排序进入当前照片之后的下一张幸存照片。不要移除 `FOF_ALLOWUNDO`。
 
 ## 未来可拆分方向
+
+JPG GPS 性能：ApprovedExifToolRunner 以 adapter session 为单位完整 manifest 验证并持续锁定全部依赖；Run 仅检查成员/identity/锁/环境，异常 fail closed。ExifToolAdapter 把 XML/base64 metadata、strict Validate、ImageDataHash 与 binary 块合并一次读取；per-file baseline 绑定完整 SHA256 和 Windows file identity，锁定后再确认才可复用。临时写后仍完整结构/private/WIC 验证；仅去除同内容重复的内置 WIC 解码。GpsPerformance 阶段计时不改 UI/挑片行为，细节见 GPS_METADATA.md。
+
+JPG GPS 1.5 仍在唯一 `RAWMate.cs`：`GpsMetadata`（DMS/十进制度与 WIC）、`ApprovedExifToolRunner`（冻结完整工具 manifest、依赖锁、13.59、禁用户 config）、`ExifToolAdapter`（严格五字段、XML/ImageDataHash/Validate）、`JpgGpsIntegrity`（真实 JPEG 段、完整解码、typed IFD、HiddenData/MPImage2 动态证明）、`GpsSourceSession`（内存来源与根目录隔离）、`GpsEditPlan`（恰好一个 JPG，不枚举 RAW）、`GpsFileTransaction`（同目录副本/验证/原子替换/恢复）。GPS UX / Grid 新增 `GpsBatchPlan`（逐目标分类并持有单 JPG 子计划）、`GpsBatchExecutor`（顺序安全事务/当前结束后取消/精确汇总）、`GpsUxState`（动作与 badge 状态）。No-GPS-IFD 阶段仅经授权扩展 JpgGpsIntegrity 并传入 Adapter 的计划坐标；六个其他基础安全/事务类不变。ExistingGpsIfdPath 原 MakerNotes 证明主体冻结；CreateGpsIfdPath 使用独立 typed pool、HiddenInfo nested、全字节 map 与公共 EXIF ownership，两个路径共享原 MPF/图像/解码/语义门禁。MainWindow 接设置、直接动作、来源条、网格选择/框选与统一确认/进度/结果。后台验证不触发挑片逻辑，写后目标路径 cache epoch 防止旧 full-image completion 回填，metadata/thumbnail 使用文件 stamp。来源监视器 + identity 轮询失效，退出期间不允许打断活动事务。RAW/XMP 没有 GPS 写入路径。详见 `GPS_METADATA.md`。
 
 只有在加入回归测试后才考虑拆分：
 

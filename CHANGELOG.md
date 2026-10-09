@@ -4,7 +4,27 @@
 
 ## [Unreleased]
 
-暂无待发布变更。
+## [1.5] - 2026-10-09
+
+### Added
+
+- JPG GPS 来源复制工作流：单张与网格多选共用确认、进度、取消剩余和精确结果；默认只补缺失，已有 GPS 必须显式授权覆盖，来源自身永远跳过。
+- 设置中显式配置可选 ExifTool 13.59，不下载、不安装、不捆绑；未配置不影响挑片。
+- 原完全无 GPS IFD 的 Sony JPG 可通过 CreateGpsIfdPath 严格 controlled relocation 验证：typed payload、HiddenInfo nested、全部字节 ownership 和公共 EXIF 引用，未解释差异为零；已有 GPS IFD 的原证明主体保持不变。
+
+### Changed
+
+- GPS 网格三态统一为 Location Filled / Location Off / Location Ripple Filled 单图标，来源优先，无文字角标、Star 或 overlay。
+- 单张与网格统一单行 GPS 来源与操作区；确认按钮统一为 [应用] [取消]，暗色下拉菜单与信息布局一致。
+- “刷新目录”强制异步重读当前 JPG GPS，即使大小/mtime 未变；更新来源坐标或清除失效来源，旧异步结果不能回填。P/J/R/X、选择、筛选、排序、当前照片与缩放保留。
+- 工具完整 manifest 按 session 验证一次并持续锁定依赖；合并只读提取，baseline 绑定 file identity + SHA256，仍保留写后完整 WIC 解码和全部安全门禁。
+
+### Safety and scope
+
+- 仅写 JPG 五字段：Latitude、LatitudeRef、Longitude、LongitudeRef、GPSStatus=A，不复制 GPS 时间，不覆盖已有其他 GPS 字段。
+- 临时副本先写、严格 Validate、JPEG payload / MakerNotes/private 动态证明、原件外部修改检测、journal / File.Replace / backup / recovery；失败不修改原件。
+- ARW GPS / XMP / 地图 / GPX / 自动位置推断不在 1.5 范围。历史 Phase 3B / 3B.1 的 FAIL 及其他阻断记录保持不变。
+- 发布保护使用可复现的专用冻结夹具，以及本轮实际访问原片的 before/after SHA；旧 226 历史快照退役为审计记录，不改写为 PASS。
 
 ## [1.4.1] - 2026-09-12
 

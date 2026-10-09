@@ -14,7 +14,7 @@ internal static class ThumbnailPerformanceTests
     static object NewThumbnailState(Type windowType)
     {
         var state = FormatterServices.GetUninitializedObject(windowType);
-        foreach (var name in new[] { "thumbnailCache", "thumbnailCacheLru", "captureDateCache", "captureDateStampCache" })
+        foreach (var name in new[] { "thumbnailCache", "thumbnailCacheLru", "thumbnailStamps", "captureDateCache", "captureDateStampCache" })
         {
             var field = windowType.GetField(name, Private);
             field.SetValue(state, Activator.CreateInstance(field.FieldType));

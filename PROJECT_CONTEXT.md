@@ -12,12 +12,13 @@ RAWMate 不是 Lightroom 的前置工具，也不绑定任何后期软件。它�
 
 - 当前仓库只代表 Windows PC 版。
 - 其他平台实现不参与当前开发、测试、版本记录或 GitHub 计划。
-- 当前主源码是 `RAWMate.cs`，约 2,900 行，界面和业务逻辑都在这一文件中。
+- 当前主源码是 `RAWMate.cs`，界面、挑片逻辑和 JPG GPS 模块都在这一文件中；没有平行业务源码。
 - 当前构建不依赖 Visual Studio 项目、NuGet、网络服务、数据库或云端账号。
 - 当前用户主要环境：Windows、Sony ILCE-6700，JPG 色彩空间 sRGB，Dell U2725QM 显示器使用 sRGB 模式。
-- 当前正式版本：`1.4.1`；Windows Assembly/FileVersion 为 `1.4.1.0`。
-- 当前没有待验收的测试候选；后续候选仍通过 `rawmate/test` 分支与独立测试 EXE 验证。
+- 当前发布版本：`1.5`；UI `v1.5`，Windows Assembly/FileVersion/ProductVersion 为 `1.5.0.0`，Git tag `v1.5`。
+- JPG GPS：WIC 读取/显示、会话来源、单张与网格确认应用、设置中显式配置可选 ExifTool 13.59。五字段写入（经纬度、Ref、GPSStatus=A），不复制 GPS 时间，不覆盖已有 VersionID/MapDatum/Differential。临时副本 + 动态完整性证明 + File.Replace；仅失效目标缓存，不改挑片状态。ARW / XMP 没有 GPS 写入路径。
 - 当前标准本地仓库路径：`C:\rawmate`。旧开发目录只作历史快照，不再作为修改入口。
+- JPG No-GPS-IFD 路径纳入 1.5：经授权扩展 JpgGpsIntegrity 的新建目录结构证明，并把 Adapter 的计划坐标传入证明；已有 GPS IFD 的 MakerNotes 证明主体冻结不变，六个其他安全/事务类保持字节等价。完整 byte ownership、typed pool、HiddenInfo nested 及公共 EXIF range 必须通过，不按机型、固定 tag 数量或 delta 放行。历史失败证据不改写。
 
 ## 3. 产品缘起与目标
 
@@ -80,6 +81,7 @@ Moon/
 
 - 选择目录和最近 3 个路径；下拉菜单可清除路径记录而不打断当前会话，重新选择或刷新目录后重新开始记忆。
 - 扫描根目录顶层以及 `jpg` / `arw` 子目录。
+- “刷新目录”强制后台重读当前 `root\jpg` GPS，不依赖 size/mtime 变化；代次隔离旧 metadata 结果，来源有效时重新绑定最新坐标、无效时清除。同目录不无条件清空图像缓存，保持决定、模式、筛选/排序、选择、当前照片和缩放/导航器。GPS 写入/图标设计不变。
 - 显示 JPG、RAW、待分类数量。
 - 显示挑片“已决定 / 总数”、百分比，以及紧凑的 P 保留、X 废片结果；未决定数量由总数减去已决定数得出，不在进度区重复显示。
 - 创建/取消 JPG/JPEG 与 ARW 分类，不覆盖同名文件。
@@ -89,6 +91,7 @@ Moon/
 
 - JPG 缩略图延迟加载；内存缓存之外使用共享、按源文件路径/大小/时间戳失效的持久缩略图缓存。
 - 网格缩略图尺寸：小、中、大、特大。
+- GPS 网格状态 UI 已按用户批准冻结：单一 Fluent Location Filled / 一体式 Location Off / Location Ripple 20 Filled（来源）；来源优先，固定 Tooltip，浅蓝/灰蓝体系，无文字角标、Star 或 overlay。尺寸与完整规则见 `docs/UI_SPEC.md`；GPS 业务与单张底栏不受此变更影响。
 - 图库卡片文件名单行居中；超长时显示字符省略号并通过悬停提示提供完整名称，不改变卡片宽度。
 - 排序：名称升/降序、EXIF 拍摄时间升/降序；无拍摄时间的照片排列在末尾。
 - 筛选：全部、保留、废片、未决定。
@@ -221,9 +224,11 @@ Moon/
 - `RAWMate.ico` 和 `RAWMateHeader.png` 都必须嵌入 EXE；正式分发只需要单个 `RAWMate.exe`，不依赖旁置图片。
 - 正式桌面快捷方式名称固定为 `RAWMate`。
 - Git 仓库不跟踪 EXE；GitHub Actions 构建测试产物，正式 EXE应通过 Release 发布。
-- GitHub 正式标签使用三段语义版本（如 `v1.1.2`）；Windows 文件属性使用四段版本（如 `1.1.2.0`）。
+- 正式标签通常使用三段版本；本次用户指定 `v1.5`，UI 为 `v1.5`，Windows 文件属性为 `1.5.0.0`。
 
 ## 11. 当前已知限制与风险
+
+- GPS UX / Grid（1.5）：设置页显式选择冻结的可选 ExifTool 13.59，不下载/安装/提交二进制；核心挑片不依赖它。单张直接动作及网格多选仅编排 root\\jpg 中逐张原事务，默认只补缺失、覆盖需主动确认、来源永远跳过；统一进度/取消剩余/精确结果。不匹配/写入 ARW 或 XMP。工具完整身份按 session 复用、全部依赖只读锁，baseline 绑定 file identity + SHA256；六个基础安全/事务类保持等价，Adapter/JpgGpsIntegrity 的授权 No-GPS-IFD 新路径见当前范围。来源 session-only，切 root 清空、同 root 刷新保留有效、变化/删除失效。详见 `docs/GPS_METADATA.md`；未知私有结构仍可能被安全拒绝。
 
 - 仅浏览 JPG/JPEG；不解码或预览 ARW。
 - 当前是单文件架构，便于分发但增加 UI 与业务耦合；在有测试覆盖前不应为了“整洁”贸然大拆分。
