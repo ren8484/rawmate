@@ -35,12 +35,13 @@ UI 全由 `Build*` 方法程序化创建。切换网格/单张视图或应用筛
 
 `ScanDirectory`：
 
-1. 读取所选根目录顶层 JPG/JPEG/ARW。
-2. 读取 `root\jpg` 和 `root\arw` 顶层。
-3. 更新三个计数和目录提示。
-4. 按当前 `jpg` 文件夹中的有效照片计算 P+J+R+X 已决定进度，并计入已完成的仅 RAW 结果。
+1.5.1 由 `RefreshCurrentFolder` 在后台调用 `PhotoCollection.Scan`：显式 stack + `EnumerateFileSystemEntries`，逐目录权限异常隔离、取消 token、scan generation；不调用阻塞 UI 的 AllDirectories GetFiles。只在当前 generation 回到 Dispatcher 后原子发布快照。`ScanDirectory` 复用快照更新计数/进度，不重复磁盘递归；无 UI 生命周期的 headless 模型测试可直接同步扫描。
 
-“刷新目录”在上述扫描后，通过 `BeginGpsDirectoryRefresh` 强制失效仅当前 `root\jpg` 的 GPS 显示缓存，并在单个后台 worker 复用 `ReadGpsDisplay` / WIC metadata-only 管线逐张读取；每 16 张通过 Dispatcher 更新。每次刷新及切 root 建立新 generation，旧普通 GPS 任务、旧批次结果和旧排序预读不能回填当前 UI。拍摄时间排序缺失缓存时保留既有后台 preload，不把 GPS 扫描变成 UI 线程逐张解码。
+`PhotoItem` 保留 AbsolutePath、RelativePath、RelativeDirectory、PairKey。PairKey=相对父 scope + stem，直接父目录是 jpg/jpeg/raw/arw 时只移除一层。大小写不敏感，不跨日期；图库与持久化/缓存仍以完整路径为身份，v2 格式不变。同名排序以完整路径稳定 tie-break。
+
+JPG/RAW 为递归实际文件计数；待分类为实际直接父目录不属于类型目录的照片数（根本身叫 jpg 时也不计为待分类）。分类按钮与递归 PendingCount 共用快照；取消分类处理集合内类型目录的直接照片，禁止移出根。不可访问/链接记录在快照 Diagnostics，不弹多次 MessageBox；`.git`/`test-output` 与自身 temp 不入库，普通 backup/recovery 目录不随意屏蔽。
+
+“刷新目录”在递归扫描后，通过 `BeginGpsDirectoryRefresh` 强制失效仅当前集合内 GPS 显示缓存，并在单个后台 worker 复用 `ReadGpsDisplay` / WIC metadata-only 管线逐张读取；每 16 张通过 Dispatcher 更新。每次刷新及切 root 建立新 generation，旧普通 GPS 任务、旧批次结果和旧排序预读不能回填当前 UI。时间排序 metadata 在扫描 worker 预读，不把递归/排序变成 UI 同步解码。
 
 `RefreshDirectoryView` 在文件列表未变时不重建视图；列表改变时保留仍存在的选中路径、当前照片和缩放/滚动，并沿用当前文件不存在时的 fallback。不再无条件调用 `ClearFullImageCache`；只有识别到具体文件 identity 变化时使用现有逐路径失效。其他目录的 GPS 缓存与未改变的图像缓存保留。
 
@@ -50,26 +51,22 @@ UI 全由 `Build*` 方法程序化创建。切换网格/单张视图或应用筛
 
 `OrganizeFiles`：
 
-1. 枚举根目录顶层目标扩展名。
-2. 用户确认。
-3. 创建 `jpg` / `arw`。
-4. `File.Move` 到对应目录。
-5. 同名存在或异常则跳过，绝不覆盖。
-6. 成功移动 JPG/RAW 时同步迁移 P/J/R/X、仅 RAW 保留记录和当前照片状态。
+1. `StartClassification` 暂停旧 scan/GPS generation 和来源 watcher；后台 `ClassificationPlan.Build` 递归列出 IsUnclassified 项，目标为实际 Parent\jpg|arw\filename。
+2. 捕获源 handle identity，记录冲突/跳过/扫描诊断；重复目标全部冲突。确认显示可移动、冲突、跳过数量。
+3. 后台 `ClassificationExecutor` 每项重新核验集合边界、CheckPath、单链接身份和目标不存在。`ClassificationDirectoryLocks` 逐级持有祖先目录的 no-delete-sharing 句柄，拒绝 reparse，避免检查后的目录替换。
+4. 源文件禁止写共享但允许 rename，`File.Move` 不覆盖；再次核验移动后 file identity。Dispatcher 只提交单项状态检查点，不同步循环磁盘移动。
+5. `CommitClassificationMove` 将六个路径集合（P/J/R/X、RAW survivor、selection）及 current 由 old→new 迁移并持久化。失败恢复内存，executor 在身份未变且原路径空缺时回移，停止剩余；不能安全回移则明确保留材料并报错。
+6. 成功项迁移 GPS 来源路径候选、tile anchor、目标 cache；结束后重新递归刷新，重新读取来源身份/GPS。保留筛选、排序、模式和 zoom。取消只停止未开始项，当前文件安全完成。非 crash-atomic 整批事务，不新增 GPS write/完整性逻辑。
 
 ### 取消分类
 
 `UnorganizeFiles`：
 
-1. 枚举 `root\jpg` 与 `root\arw` 顶层照片。
-2. 在移动前检查根目录所有同名冲突；存在任一冲突则整体停止。
-3. 用户确认后逐个 `File.Move` 回根目录并记录失败项。
-4. 仅当 `jpg` / `arw` 完全为空时删除空文件夹。
-5. 成功还原 JPG/RAW 时同步迁移挑片决定和当前照片状态。
+与创建分类共享同一 plan/executor/checkpoint，仅路径规则改为 Parent\jpg|jpeg|raw|arw\file → Parent\file。只移除直接类型目录一层，所有日期目录保留；冲突逐项保留原位。所选根本身为类型目录时不允许向外还原。保守保留全部空类型目录，不删除非空或用户既有目录。
 
 ### 文件对应
 
-`Stem` 取文件名主体；所有集合使用 `StringComparer.OrdinalIgnoreCase`。`InspectCorrespondence` 区分完整配对、仅 JPG、仅 RAW、未记录单格式和状态矛盾。J/R 清理主动形成的单格式是正常终态；检查只报告，不移动文件。
+`PhotoCollection` 按 PairKey 建立 JPG / RAW 多值索引；歧义绝不 first-wins。`InspectCollectionCorrespondence` 区分完整配对、仅 JPG、仅 RAW、未记录单格式和状态矛盾。J/R 清理主动形成的单格式是正常终态；检查只报告，不移动文件。
 
 ## 图像管线
 
@@ -125,7 +122,7 @@ UI 全由 `Build*` 方法程序化创建。切换网格/单张视图或应用筛
 - `FOF_SILENT`
 - `FOF_NOERRORUI`
 
-`BuildCleanupPlan` 只正向枚举当前 `root\jpg` 的 J/R/X，并只用当前 `root\arw` 建立唯一配对。确认后 `ExecuteCleanupPlan` 再校验根目录边界、链接、决定和文件时间戳。P 不动；J 回收 RAW；R 先持久化 RAW 保留意图再回收 JPG；X 先回收 RAW，成功后再回收 JPG。
+清理确认前后台重新扫描集合，由 `BuildCleanupFromCollection` 正向筛选 J/R/X，按 PairKey 唯一配对实际路径。Diagnostics 非空意味着枚举不完整，清理 fail closed，不把“未读到”冒充“没有 RAW”。确认后 `ExecuteCleanupPlan` 用 `ReadPairScope` 重新枚举该 scope 与直接类型目录，阻断新歧义/链接/越界/决定或 stamp 变化；不按全局 stem、不拼固定 root\jpg 路径。P 不动；J 回收 RAW；R 先持久化 RAW 保留意图再回收 JPG；X 先回收 RAW，成功后再回收 JPG。
 
 `RecycleFiles` 返回精确的 `SuccessPaths` 与 `FailedPaths`。成功 JPG 才清除其 JPG 锚定决定，失败项保留以便重试；部分 X 在 RAW 成功、JPG 失败时仍保留 X 锚点。清理后只淘汰成功移除文件的图像缓存，并按清理前排序进入当前照片之后的下一张幸存照片。不要移除 `FOF_ALLOWUNDO`。
 

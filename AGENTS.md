@@ -33,12 +33,12 @@
 
 以下规则不可因 UI 重构或“简化逻辑”而破坏：
 
-- 分类只处理用户所选根目录顶层的 `.jpg`、`.jpeg` 和 `.arw`；不递归扫描其他子目录。
-- JPG/JPEG 移到根目录下 `jpg`，ARW 移到根目录下 `arw`。
+- 浏览/统计/刷新递归扫描所选 Collection Root 内 JPG/JPEG/ARW；跳过 reparse/link、不可访问目录、`.git` / `test-output` 与 RAWMate transaction/temp。创建分类只将直接父目录非 jpg/jpeg/raw/arw 的照片移入其实际父目录下 jpg/arw，取消分类只还原到类型目录自己的父目录；不跨根、不汇总日期目录、不套娃。逐项冲突保留原位，重复目标全部拒绝；后台可取消，成功移动同步迁移决定、RAW survivor、选择/当前照片和 GPS 来源路径并重新核验来源。
+- JPG/JPEG 移到各自实际父目录下 `jpg`，ARW 移到各自实际父目录下 `arw`，不得扁平汇总到集合根。
 - 目标存在同名文件时必须跳过，绝不覆盖。
-- JPG 与 ARW 按不区分大小写的文件名主体配对，如 `DSC0001.JPG` 对应 `DSC0001.ARW`。
+- JPG 与 ARW 按不区分大小写的相对路径 PairKey 配对：相对父目录 + stem，仅当直接父目录为 jpg/jpeg/raw/arw 时去掉这一层；禁止跨日期/上层 scope 仅按 stem 配对。每张 PhotoItem 保留 AbsolutePath / RelativePath / RelativeDirectory / PairKey；决定/缓存继续使用完整路径。
 - 所有清理动作必须进入 Windows 回收站；程序不得提供或调用永久删除。
-- “执行清理”必须先枚举当前所选 `root\jpg`，再筛选 J/R/X 状态；禁止从跨目录持久化集合反向生成删除候选，配对也只来自当前 `root\arw`。
+- “执行清理”必须先重新递归枚举当前集合，再按扫描的真实 JPG 路径筛选 J/R/X；配对限定同 PairKey，禁止从跨集合持久化集合反向生成候选、拼 root\jpg\filename 或全局 stem 查 RAW。枚举不完整时清理 fail closed；确认后逐组重新枚举实际 scope，复核边界/链接/歧义/决定/文件身份。
 - P/J/R/X 都只记录决定。只有用户确认“执行清理”后才回收：P 不动，J 回收 RAW，R 回收 JPG，X 回收两者。未决定不动；同名主体歧义、保留目标缺失、链接文件/目录不能进入清理。
 - 只清除确认回收成功的 JPG 决定；失败 JPG 保留原状态。R 必须先持久化存活 RAW 的保留意图，再回收 JPG，不能把 R 的保留意图随 JPG 一起丢弃；J 保留在存活 JPG 上。
 - X 成对清理先回收 RAW，失败时保留 JPG 与 X 以便重试；RAW 成功而 JPG 失败时也保留 X。确认后文件/决定变化应跳过并报告。保存失败停止后续清理。

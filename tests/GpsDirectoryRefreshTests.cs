@@ -82,7 +82,7 @@ internal static class GpsDirectoryRefreshTests {
         var image=BitmapSource.Create(8,8,96,96,PixelFormats.Rgb24,null,new byte[192],24);image.Freeze();
         ((IDictionary)Field("thumbnailCache"))[a]=Tuple.Create(512,image);((IDictionary)Field("thumbnailStamps"))[a]=Call("FileStamp",a);
         ((IDictionary)Field("fullImageCache"))[a]=image;
-        string other=Path.Combine(root,"outside","KEEP.JPG");Directory.CreateDirectory(Path.GetDirectoryName(other));ExternalGps(other,true);SeedCache(other,new GpsMetadata(1,2,null,null,other));
+        string other=Path.Combine(root+"-outside","KEEP.JPG");Directory.CreateDirectory(Path.GetDirectoryName(other));ExternalGps(other,true);SeedCache(other,new GpsMetadata(1,2,null,null,other));
         Refresh();
         Check(selection.SetEquals(new[]{a,b})&&(string)Field("currentSingleFile")==b,"multi-selection and current photo retained");
         Check((string)Field("activeFilter")=="picked"&&(string)Field("gallerySortMode")=="name_desc"&&!(bool)Field("advanceToUndecided")&&(double)Field("gridTileWidth")==160,"filter sort browse thumbnail size retained");

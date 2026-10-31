@@ -8,6 +8,14 @@
 
 ## 1. 构建检查
 
+1.5.1 发布保持已验收递归功能冻结；仅三个程序集版本属性变化。Test 与隔离正式候选均须显示 v1.5.1（Assembly/FileVersion 1.5.1.0，ProductVersion 1.5.1）。正式候选在无 sidecar PNG 目录启动，使用隔离照片并备份/恢复正式用户 state；重启后核对四种决定和当前路径，来源按原设计只在会话内。旧正式 EXE 在全部验证通过前保持不变。
+
+递归集合候选：`tests\Run-RecursiveDirectoryTests.ps1 -ExifToolPath <用户工具> -BaselineRoot <release-baseline-1.5>`。新隔离夹具覆盖四天 JPG=4/RAW=3、同名路径身份、同目录/sibling/别名 PairKey、跨日期禁止配对、歧义、v2 状态独立、真实路径模拟回收、R survivor、确认后新歧义、权限拒绝（仅夹具 DACL，finally 恢复）、junction、temp/dev 排除、普通目录不排除、跨日实拍复制件 GPS 完整事务、增删子目录/来源/metadata、最新 generation、多选与 2000 文件 Dispatcher heartbeat。不会写用户原片或真的回收文件。仍运行 GPS178 / UX>=77 / Cull61 / Refresh40、原 CreateGpsIfd 9/837/18、JPG integration/evidence/safety；不重新生成九张 baseline。
+
+递归请求授权修改 `GpsFileSafety.ValidateJpg` 的成员判定/提示。UX hash 仅更新该类，并增加“还原这两处文本后必须匹配旧 hash”断言；其余七个类与 ExistingGpsIfd proof 的冻结不变。Refresh 旧“其他目录 cache”夹具移到集合根之外，原断言不删。
+
+递归分类新增测试在相同 runner 内：精确 day1 A / day2 B / day3 已分类 C / day4 D 的 4 JPG、3 RAW、5 pending；父目录分别移动、禁止根聚合和套娃；创建/还原 P/J/R/X、RAW survivor、持久化、selection/current/filter/sort/browse/zoom、来源新路径/坐标与 PairKey。另覆盖创建/还原冲突、重复目标全部拒绝、根名为 jpg 的边界、late target、确认后 identity 改变、祖先目录 rename 阻断、状态保存失败回移、取消前/部分完成、ADS/newline 及 500 文件后台 Dispatcher heartbeat。所有移动只在新 test-output；保留原 70 条扫描/GPS/配对/模拟清理覆盖，不真正回收照片。实际 Test UI 必须另行验证分类按钮、确认汇总、分类后 pending=0、日期结构、跨日期同名、状态与来源保留，再取消分类验证。
+
 No-GPS-IFD 1.5 回归：`tests\Run-CreateGpsIfdTests.ps1 -Mode readonly -PairsPath <before|retained-temp|source 清单> -ExifToolPath <显式 exe> -OutputPath <test-output JSON>` 先只读跑九组完整生产验证、23 类及逐 typed payload/offset 负向检查，必须失败于预期安全类别，禁止 catch-all 冒充通过。全部通过后，`-Mode transactions` 使用全新 test-output working directory，覆盖真实 GpsFileTransaction、Grid executor、private mutation 阻断及继续下一张。另须运行 178 GPS / 61 Cull / 77 UX/Grid、JPG integration/evidence 与实际网格 UI；正式冒烟也只能使用独立 working copy。UX 原八类冻结测试仅更新经授权的 Adapter/JpgGpsIntegrity 两个 hash，六个其他类仍冻结；旧 ExistingGpsIfd MakerNotes 证明主体另行冻结。报告不得把 executor 测试写成已操作真实 UI。
 
 GPS UX / Grid 回归： `tests\Run-GpsUxGridTests.ps1`，覆盖设置/照片菜单、直接动作、来源身份/视图/root、三态 badge、选中分类、默认跳过/明确覆盖、单失败继续、取消剩余和底层八个安全类与写前快照逐字节等价。仍须运行 178 GPS / 61 Cull、真实 JPG 集成及独立 evidence tests。人工 UI 必须在新 test-output 实拍复制件上核验单张、三张多选、混合默认跳过、主动覆盖、设置唯一配置入口，保存截图；不得据编译或模拟测试宣称实际 UI PASS。

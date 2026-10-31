@@ -1,6 +1,6 @@
-# JPG GPS（RAWMate 1.5）
+# JPG GPS（RAWMate 1.5.1）
 
-历史正式 1.4.1 不含 GPS 编辑。1.5 的 GPS UX / Grid：只支持 root\\jpg 中 JPG/JPEG 的 GPS 读取、会话来源、单张及多选确认应用。ARW / XMP / 地图 / 推断没有 GPS 写入计划，也不匹配同 stem RAW。历史 Phase 3B / 3B.1 结论与失败材料保留。
+历史正式 1.4.1 不含 GPS 编辑。历史 1.5 限 root\\jpg；1.5.1 扩展为当前 Collection Root 内任意子目录的正式 JPG/JPEG。来源可跨子目录，应用目标不要求与来源同一天；只调整 ValidateJpg 的集合成员谓词和提示，CheckPath 的本地/链接/硬链接/ADS 禁止、完整性证明、工具、事务均保持。ARW / XMP / 地图 / 推断没有 GPS 写入计划，也不匹配 RAW。历史 Phase 3B / 3B.1 失败证据保留。
 
 ## 工具与五字段
 
@@ -60,9 +60,11 @@ Sony out-of-line entry 由 `count × type-size > 4` 动态识别，不按型号�
 
 ## 挑片状态与缓存
 
-点击“刷新目录”强制重读当前 `root\jpg` 的 GPS 显示 metadata，即使路径、length、mtime 和文件 ID 都不变；使用既有轻量 WIC 读取，不调用 ExifTool、GPS transaction、JPEG full decode 或 private/relocation proof。单 worker 后台逐张读取、16 张一批回 UI；refresh generation 防止旧任务覆盖新刷新。仅 GPS 显示缓存无条件失效，图像/缩略图仅在已有身份变化证据下按路径淘汰，不清除其他目录缓存或挑片状态。
+点击“刷新目录”先后台递归重新枚举，再强制重读当前集合全部 JPG 的 GPS 显示 metadata，即使路径、length、mtime 和文件 ID 都不变；复用既有轻量 WIC 读取，不调用 ExifTool、GPS transaction、JPEG full decode 或 private/relocation proof。单 worker 后台逐张读取、16 张一批回 UI；scan / refresh generation 阻止旧任务回填。仅当前集合 GPS 显示缓存无条件失效，图像/缩略图仅按身份变化逐路径淘汰，不清除其他集合缓存或挑片状态。
 
 刷新同时核验用户选过的当前 root 来源文件，重新建立原 SHA256/file identity 绑定。有效 GPS 保留来源并更新坐标；删除、不属于 root、无 GPS 或不可读则清除。若监视器已先清掉过期坐标，只保留路径候选供刷新重新读取，不保留旧坐标；显式“清除”或切 root 不会自动恢复。该候选仅当前会话有效，不能作为未核验的写入来源。同目录文件列表未变时不重建视图；筛选/排序、选择、当前照片、模式和缩放/导航器保持。
+
+递归分类/取消分类期间暂停 watcher 并使旧 metadata generation 作废；只有成功移动且状态已持久化的 old→new 映射才迁移来源候选。结束后清除旧身份/坐标，通过原刷新管线重新读取新路径，不把旧 Source 对象直接改名复用。移动失败保留旧路径并重新核验。分类不执行 GPS 写入或 JPG 完整性门禁。
 
 写入回调不调用决定、导航、RebuildUi、RefreshCurrentFolder、完成汇总或清理。P/J/R/X、计数、模式、筛选、排序、当前照片、缩放/滚动保持。仅 RemoveImageCachesForPaths(target)；per-path epoch 阻断旧 full-image completion，thumbnail/metadata 文件 stamp 防止旧 cache 回填。当前照片仍是目标时立即 WIC 重读 GPS，主图内容不重新编码、不重载缩放。
 

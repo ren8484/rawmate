@@ -32,9 +32,9 @@ using Forms = System.Windows.Forms;
 [assembly: AssemblyCompany("ren8484")]
 [assembly: AssemblyProduct("RAWMate")]
 [assembly: AssemblyCopyright("Copyright © 2026 ren8484")]
-[assembly: AssemblyVersion("1.5.0.0")]
-[assembly: AssemblyFileVersion("1.5.0.0")]
-[assembly: AssemblyInformationalVersion("1.5.0.0")]
+[assembly: AssemblyVersion("1.5.1.0")]
+[assembly: AssemblyFileVersion("1.5.1.0")]
+[assembly: AssemblyInformationalVersion("1.5.1")]
 
 internal static class Program
 {
@@ -493,6 +493,218 @@ internal sealed class ExifToolAdapter : IDisposable
     }
 }
 
+internal sealed class ClassificationEntry
+{
+    internal string Source,Destination,Identity,Disposition,Reason;
+}
+
+internal sealed class ClassificationPlan
+{
+    internal string Root;internal bool Undo;
+    internal readonly List<ClassificationEntry> Entries=new List<ClassificationEntry>();
+    internal readonly List<string> Diagnostics=new List<string>();
+    internal int ReadyCount {get{return Entries.Count(e=>e.Disposition=="ready");}}
+    internal int ConflictCount {get{return Entries.Count(e=>e.Disposition=="conflict");}}
+    internal static string Destination(PhotoItem item,bool undo) {
+        string parent=Path.GetDirectoryName(item.AbsolutePath);
+        return undo?Path.Combine(Path.GetDirectoryName(parent),Path.GetFileName(item.AbsolutePath)):
+            Path.Combine(parent,item.IsJpg?"jpg":"arw",Path.GetFileName(item.AbsolutePath));
+    }
+    internal static bool Exists(string path) {
+        try {File.GetAttributes(path);return true;}catch(FileNotFoundException){return false;}catch(DirectoryNotFoundException){return false;}
+    }
+    internal static void ValidatePaths(string root,string source,string destination) {
+        if(!PhotoCollection.ContainsPath(root,source)||!PhotoCollection.ContainsPath(root,destination))throw new IOException("分类路径不在当前集合内。");
+        GpsFileSafety.CheckPath(root);GpsFileSafety.CheckPath(source);GpsFileSafety.CheckPath(destination);
+    }
+    internal static ClassificationPlan Build(string root,bool undo,CancellationToken token) {
+        var plan=new ClassificationPlan{Root=PhotoCollection.Normalize(root),Undo=undo};
+        GpsFileSafety.CheckPath(plan.Root);
+        var snapshot=PhotoCollection.Scan(plan.Root,token);plan.Diagnostics.AddRange(snapshot.Diagnostics);
+        foreach(var photo in snapshot.Photos) {
+            token.ThrowIfCancellationRequested();if(undo?photo.IsUnclassified:!photo.IsUnclassified)continue;
+            var e=new ClassificationEntry{Source=photo.AbsolutePath,Disposition="ready"};plan.Entries.Add(e);
+            try {
+                e.Destination=Destination(photo,undo);ValidatePaths(plan.Root,e.Source,e.Destination);
+                if(undo&&PhotoCollection.IsTypeDirectory(Path.GetFileName(plan.Root))&&GpsFileSafety.Same(Path.GetDirectoryName(e.Source),plan.Root))throw new IOException("取消分类不能移出当前集合根目录。");
+                if(Exists(e.Destination)){e.Disposition="conflict";e.Reason="目标已存在，未覆盖";continue;}
+                using(var stream=new FileStream(e.Source,FileMode.Open,FileAccess.Read,FileShare.Read|FileShare.Delete))e.Identity=GpsFileSafety.HandleIdentity(stream);
+            }catch(Exception error){e.Disposition="skipped";e.Reason=error.Message;}
+        }
+        foreach(var group in plan.Entries.Where(e=>e.Destination!=null).GroupBy(e=>e.Destination,StringComparer.OrdinalIgnoreCase).Where(g=>g.Count()>1))
+            foreach(var e in group){e.Disposition="conflict";e.Reason="多个源文件指向同一目标，全部保留原位";}
+        return plan;
+    }
+}
+
+// Keep every ancestor directory stable through the final checks and rename.
+// No delete-sharing: a junction/rename swap cannot replace a checked ancestor.
+internal sealed class ClassificationDirectoryLocks : IDisposable
+{
+    [StructLayout(LayoutKind.Sequential)]private struct Info {internal uint Attributes,CreationLow,CreationHigh,AccessLow,AccessHigh,WriteLow,WriteHigh,Volume,SizeHigh,SizeLow,Links,IndexHigh,IndexLow;}
+    [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)]private static extern Microsoft.Win32.SafeHandles.SafeFileHandle CreateFile(string path,uint access,uint share,IntPtr security,uint creation,uint flags,IntPtr template);
+    [DllImport("kernel32.dll",SetLastError=true)]private static extern bool GetFileInformationByHandle(Microsoft.Win32.SafeHandles.SafeFileHandle handle,out Info info);
+    private readonly List<Microsoft.Win32.SafeHandles.SafeFileHandle> handles=new List<Microsoft.Win32.SafeHandles.SafeFileHandle>();
+    internal ClassificationDirectoryLocks(string source,string destination) {
+        try {
+            var paths=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach(string start in new[]{Path.GetDirectoryName(source),Path.GetDirectoryName(destination)})
+                for(string p=start;!String.IsNullOrEmpty(p);p=Path.GetDirectoryName(p))if(Directory.Exists(p))paths.Add(p);
+            foreach(string path in paths.OrderBy(p=>p.Length))Lock(path);
+            string parent=Path.GetDirectoryName(destination);Directory.CreateDirectory(parent);Lock(parent);
+        }catch{Dispose();throw;}
+    }
+    private void Lock(string path) {
+        var handle=CreateFile(path,0x80,3,IntPtr.Zero,3,0x02000000|0x00200000,IntPtr.Zero);
+        Info info;
+        if(handle.IsInvalid||!GetFileInformationByHandle(handle,out info)||(info.Attributes&(uint)FileAttributes.ReparsePoint)!=0||(info.Attributes&(uint)FileAttributes.Directory)==0){handle.Dispose();throw new IOException("分类目录无法锁定或包含链接："+path);}
+        handles.Add(handle);
+    }
+    public void Dispose(){foreach(var h in handles)h.Dispose();handles.Clear();}
+}
+
+internal sealed class ClassificationResult
+{
+    internal readonly Dictionary<string,string> Moved=new Dictionary<string,string>(StringComparer.OrdinalIgnoreCase);
+    internal readonly List<string> Conflicts=new List<string>(),Skipped=new List<string>(),Failed=new List<string>();
+    internal bool Cancelled;
+}
+
+internal static class ClassificationExecutor
+{
+    internal static ClassificationResult Execute(ClassificationPlan plan,CancellationToken token,Func<string,string,bool> commit,Action<int,int,string> progress=null,Action<ClassificationEntry> beforeMove=null) {
+        var result=new ClassificationResult();int index=0;bool stop=false;
+        foreach(var e in plan.Entries) {
+            index++;if(progress!=null)progress(index,plan.Entries.Count,e.Source);
+            if(e.Disposition=="conflict"){result.Conflicts.Add(e.Source+"："+e.Reason);continue;}
+            if(e.Disposition!="ready"){result.Skipped.Add(e.Source+"："+e.Reason);continue;}
+            if(token.IsCancellationRequested||stop){result.Cancelled=token.IsCancellationRequested;result.Skipped.Add(e.Source+"：未开始移动");continue;}
+            try {
+                ClassificationPlan.ValidatePaths(plan.Root,e.Source,e.Destination);
+                if(ClassificationPlan.Exists(e.Destination)){result.Conflicts.Add(e.Source+"：确认后目标已存在，未覆盖");continue;}
+                using(var dirs=new ClassificationDirectoryLocks(e.Source,e.Destination))
+                using(var file=new FileStream(e.Source,FileMode.Open,FileAccess.Read,FileShare.Read|FileShare.Delete)) {
+                    if(GpsFileSafety.HandleIdentity(file)!=e.Identity)throw new IOException("确认后源文件 identity 已改变");
+                    if(beforeMove!=null)beforeMove(e);
+                    ClassificationPlan.ValidatePaths(plan.Root,e.Source,e.Destination);
+                    using(var current=new FileStream(e.Source,FileMode.Open,FileAccess.Read,FileShare.Read|FileShare.Delete))
+                        if(GpsFileSafety.HandleIdentity(current)!=e.Identity)throw new IOException("移动前源路径 identity 已改变");
+                    if(ClassificationPlan.Exists(e.Destination)){result.Conflicts.Add(e.Source+"：目标已出现，未覆盖");continue;}
+                    File.Move(e.Source,e.Destination);bool committed=false;
+                    try {
+                        using(var moved=new FileStream(e.Destination,FileMode.Open,FileAccess.Read,FileShare.Read|FileShare.Delete))
+                            if(GpsFileSafety.HandleIdentity(moved)!=e.Identity)throw new IOException("移动后 identity 不符");
+                        committed=commit(e.Source,e.Destination);
+                        if(!committed)throw new IOException("状态未能持久化");
+                        result.Moved.Add(e.Source,e.Destination);
+                    }catch(Exception stateError) {
+                        stop=true;
+                        if(!committed&&!ClassificationPlan.Exists(e.Source)) {
+                            using(var moved=new FileStream(e.Destination,FileMode.Open,FileAccess.Read,FileShare.Read|FileShare.Delete))
+                                if(GpsFileSafety.HandleIdentity(moved)!=e.Identity)throw new IOException("状态保存失败且目标改变，请保留恢复文件："+e.Destination,stateError);
+                            File.Move(e.Destination,e.Source);
+                            throw new IOException("状态保存失败，已还原原路径；停止后续移动",stateError);
+                        }
+                        throw new IOException("状态保存失败，无法安全还原；请保留源/目标核查："+e.Source+" → "+e.Destination,stateError);
+                    }
+                }
+            }catch(Exception error){result.Failed.Add(e.Source+"："+error.Message);}
+        }
+        return result;
+    }
+}
+
+internal sealed class PhotoItem
+{
+    // Pair scopes remove exactly one immediate type-directory layer, never a
+    // date/collection ancestor. Flat gallery layout does not erase identity.
+    public readonly string AbsolutePath, RelativePath, RelativeDirectory, PairKey;
+    public readonly bool IsJpg,IsUnclassified;
+    internal PhotoItem(string root, string file) {
+        AbsolutePath=Path.GetFullPath(file);RelativePath=PhotoCollection.Relative(root,AbsolutePath);
+        RelativeDirectory=Path.GetDirectoryName(RelativePath)??String.Empty;
+        string scope=RelativeDirectory;
+        if(PhotoCollection.IsTypeDirectory(Path.GetFileName(scope)))scope=Path.GetDirectoryName(scope)??String.Empty;
+        PairKey=Path.Combine(scope,Path.GetFileNameWithoutExtension(file));
+        IsJpg=GpsFileSafety.IsJpg(file);
+        IsUnclassified=!PhotoCollection.IsTypeDirectory(Path.GetFileName(Path.GetDirectoryName(AbsolutePath)));
+    }
+}
+
+internal sealed class PhotoCollection
+{
+    public readonly string Root;
+    public readonly System.Collections.ObjectModel.ReadOnlyCollection<PhotoItem> Photos;
+    public readonly System.Collections.ObjectModel.ReadOnlyCollection<string> Diagnostics;
+    public readonly Dictionary<string,List<PhotoItem>> JpgPairs,RawPairs;
+    public readonly int PendingCount;
+    internal PhotoCollection(string root,IEnumerable<PhotoItem> photos,IEnumerable<string> diagnostics) {
+        Root=Normalize(root);Photos=photos.OrderBy(p=>p.RelativePath,StringComparer.OrdinalIgnoreCase).ToList().AsReadOnly();
+        Diagnostics=diagnostics.ToList().AsReadOnly();
+        JpgPairs=Photos.Where(p=>p.IsJpg).GroupBy(p=>p.PairKey,StringComparer.OrdinalIgnoreCase).ToDictionary(g=>g.Key,g=>g.ToList(),StringComparer.OrdinalIgnoreCase);
+        RawPairs=Photos.Where(p=>!p.IsJpg).GroupBy(p=>p.PairKey,StringComparer.OrdinalIgnoreCase).ToDictionary(g=>g.Key,g=>g.ToList(),StringComparer.OrdinalIgnoreCase);
+        PendingCount=Photos.Count(p=>p.IsUnclassified);
+    }
+    internal static string Normalize(string root) {string p=Path.GetFullPath(root);return p.Length>3?p.TrimEnd(Path.DirectorySeparatorChar,Path.AltDirectorySeparatorChar):p;}
+    internal static bool IsTypeDirectory(string name) {return new[]{"jpg","jpeg","raw","arw"}.Contains(name,StringComparer.OrdinalIgnoreCase);}
+    internal static bool IsArtifact(string name) {return name.StartsWith(".rawmate-gps-",StringComparison.OrdinalIgnoreCase)||name.EndsWith(".rawmate-gps-backup",StringComparison.OrdinalIgnoreCase)||name.EndsWith(".rawmate-gps-transaction",StringComparison.OrdinalIgnoreCase);}
+    internal static bool IsExcludedDirectory(string name) {return String.Equals(name,".git",StringComparison.OrdinalIgnoreCase)||String.Equals(name,"test-output",StringComparison.OrdinalIgnoreCase);}
+    internal static string Relative(string root,string file) {
+        string prefix=Normalize(root).TrimEnd('\\')+"\\",full=Path.GetFullPath(file);
+        if(!full.StartsWith(prefix,StringComparison.OrdinalIgnoreCase))throw new IOException("照片不在当前集合根目录内。");
+        return full.Substring(prefix.Length);
+    }
+    internal static bool ContainsPath(string root,string file) {
+        try {string relative=Relative(root,file);string[] parts=relative.Split('\\');return !parts.Take(parts.Length-1).Any(IsExcludedDirectory)&&!IsArtifact(Path.GetFileName(file));}catch{return false;}
+    }
+    internal static bool SafePath(string file) {
+        try {for(string p=Path.GetFullPath(file);!String.IsNullOrEmpty(p);p=Path.GetDirectoryName(p))
+            if((File.Exists(p)||Directory.Exists(p))&&(File.GetAttributes(p)&FileAttributes.ReparsePoint)!=0)return false;
+            return true;}catch{return false;}
+    }
+    internal static string AbsolutePairKey(string file) {
+        string parent=Path.GetDirectoryName(Path.GetFullPath(file));
+        if(IsTypeDirectory(Path.GetFileName(parent)))parent=Path.GetDirectoryName(parent);
+        return Path.Combine(parent,Path.GetFileNameWithoutExtension(file));
+    }
+    private static void ReadDirectory(string root,string directory,bool recurse,Stack<string> pending,List<PhotoItem> photos,List<string> diagnostics,CancellationToken cancel) {
+        try {
+            foreach(string path in Directory.EnumerateFileSystemEntries(directory)) {
+                cancel.ThrowIfCancellationRequested();
+                try {
+                    var attributes=File.GetAttributes(path);
+                    if((attributes&FileAttributes.ReparsePoint)!=0){if(diagnostics.Count<100)diagnostics.Add("跳过链接："+path);continue;}
+                    if((attributes&FileAttributes.Directory)!=0) {
+                        if(recurse&&!IsExcludedDirectory(Path.GetFileName(path)))pending.Push(path);
+                    }else if(ContainsPath(root,path)&&(GpsFileSafety.IsJpg(path)||String.Equals(Path.GetExtension(path),".arw",StringComparison.OrdinalIgnoreCase)))photos.Add(new PhotoItem(root,path));
+                }catch(OperationCanceledException){throw;}
+                catch(Exception e){if(e is IOException||e is UnauthorizedAccessException||e is System.Security.SecurityException){if(diagnostics.Count<100)diagnostics.Add("跳过不可访问项："+path+" ("+e.GetType().Name+")");}else throw;}
+            }
+        }catch(OperationCanceledException){throw;}
+        catch(Exception e){if(e is IOException||e is UnauthorizedAccessException||e is System.Security.SecurityException){if(diagnostics.Count<100)diagnostics.Add("跳过不可访问目录："+directory+" ("+e.GetType().Name+")");}else throw;}
+    }
+    internal static PhotoCollection Scan(string root,CancellationToken cancel) {
+        root=Normalize(root);var photos=new List<PhotoItem>();var diagnostics=new List<string>();var pending=new Stack<string>();
+        cancel.ThrowIfCancellationRequested();
+        if(!SafePath(root)){diagnostics.Add("集合根目录包含链接，已停止扫描。");return new PhotoCollection(root,photos,diagnostics);}
+        pending.Push(root);
+        while(pending.Count>0){cancel.ThrowIfCancellationRequested();string directory=pending.Pop();if(!SafePath(directory)){if(diagnostics.Count<100)diagnostics.Add("跳过链接目录："+directory);continue;}ReadDirectory(root,directory,true,pending,photos,diagnostics,cancel);}
+        return new PhotoCollection(root,photos,diagnostics);
+    }
+    // Recheck only the confirmed pair's physical scope, including ambiguous
+    // unclassified/type-folder duplicates. Never globally match a filename.
+    internal static PhotoCollection ReadPairScope(string root,string file) {
+        var item=new PhotoItem(root,file);string relativeScope=Path.GetDirectoryName(item.PairKey)??String.Empty;
+        string scope=Path.Combine(Normalize(root),relativeScope);var photos=new List<PhotoItem>();var diagnostics=new List<string>();
+        foreach(string directory in new[]{scope}.Concat(new[]{"jpg","jpeg","raw","arw"}.Select(n=>Path.Combine(scope,n)))) {
+            if(!Directory.Exists(directory))continue;
+            if(!SafePath(directory)){diagnostics.Add("配对范围含链接："+directory);continue;}
+            ReadDirectory(root,directory,false,null,photos,diagnostics,CancellationToken.None);
+        }
+        return new PhotoCollection(root,photos,diagnostics);
+    }
+}
+
 internal static class GpsFileSafety
 {
     [StructLayout(LayoutKind.Sequential)]
@@ -565,9 +777,9 @@ internal static class GpsFileSafety
     internal static void ValidateJpg(string root, string jpg)
     {
         CheckPath(root); CheckPath(jpg);
-        if (!File.Exists(jpg) || !Same(Path.GetDirectoryName(jpg), Path.Combine(root, "jpg")) ||
+        if (!File.Exists(jpg) || !PhotoCollection.ContainsPath(root, jpg) ||
             !(String.Equals(Path.GetExtension(jpg), ".jpg", StringComparison.OrdinalIgnoreCase) || String.Equals(Path.GetExtension(jpg), ".jpeg", StringComparison.OrdinalIgnoreCase)))
-            throw new IOException("GPS JPG 必须位于当前 root\\jpg。");
+            throw new IOException("GPS JPG 必须是当前集合根目录内的正式照片。");
     }
 }
 
@@ -1309,6 +1521,11 @@ internal sealed class MainWindow : Window
     private readonly HashSet<Border> loadingThumbnailTiles = new HashSet<Border>();
     private readonly HashSet<string> selectedFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     private readonly List<string> galleryFiles = new List<string>();
+    private PhotoCollection collection;
+    private bool collectionUiEnabled,collectionScanning,restoringCollectionSession;
+    private int collectionGeneration;
+    private CancellationTokenSource collectionCancellation;
+    private bool classificationBusy;
     private readonly HashSet<string> pickedFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> rejectedFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> jpgOnlyFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -1393,6 +1610,7 @@ internal sealed class MainWindow : Window
         LoadSettings();
         LoadCullMarks();
         LoadCaptureDateCache();
+        collectionUiEnabled=true;
         if (!String.IsNullOrWhiteSpace(lastFolder)) folderBox.Text = lastFolder;
         Background = Brush("#171B21");
         UseLayoutRounding = true;
@@ -1411,8 +1629,8 @@ internal sealed class MainWindow : Window
             Dispatcher.BeginInvoke(DispatcherPriority.ContextIdle, new Action(RestoreSession));
             if (!String.IsNullOrEmpty(gpsToolPath)) ConfigureGpsTool(gpsToolPath);
         };
-        Closing += delegate(object sender,System.ComponentModel.CancelEventArgs e) { if(gpsBusy){e.Cancel=true;SetStatus("GPS 事务正在安全处理，请先取消剩余并等待当前事务结束。",true);return;} Interlocked.Increment(ref gpsContextEpoch); SaveSettings(); SaveCullMarks(); SaveCaptureDateCache(); };
-        Closed += delegate { if(gpsAdapter!=null){gpsAdapter.Dispose();gpsAdapter=null;} };
+        Closing += delegate(object sender,System.ComponentModel.CancelEventArgs e) { if(gpsBusy||classificationBusy){e.Cancel=true;SetStatus("文件操作正在安全处理，请先取消剩余并等待当前文件完成。",true);return;} Interlocked.Increment(ref gpsContextEpoch); SaveSettings(); SaveCullMarks(); SaveCaptureDateCache(); };
+        Closed += delegate { Interlocked.Increment(ref collectionGeneration);if(collectionCancellation!=null)collectionCancellation.Cancel();if(gpsAdapter!=null){gpsAdapter.Dispose();gpsAdapter=null;} };
         Closed += delegate { if(gpsSourceWatcher!=null)gpsSourceWatcher.Dispose();if(gpsSourcePoll!=null)gpsSourcePoll.Stop(); };
     }
 
@@ -1790,7 +2008,7 @@ internal sealed class MainWindow : Window
     {
         var currentFiles = new List<string>();
         var root = RootFolder(false);
-        if (root != null) currentFiles = FilesIn(Path.Combine(root, "jpg")).Where(IsJpg).ToList();
+        if (root != null) currentFiles = CollectionJpgs(root);
         var completedRaw = root == null ? 0 : CompletedRawOnlyInRoot(root).Count;
         var total = currentFiles.Count + completedRaw;
         var picked = currentFiles.Count(IsKept) + completedRaw;
@@ -1811,7 +2029,7 @@ internal sealed class MainWindow : Window
     {
         if (recycleRejectedButton == null) return;
         var root = RootFolder(false);
-        var enabled = !cullMarksReadFailed && root != null && BuildCleanupPlan(root).Items.Count > 0;
+        var enabled = !cullMarksReadFailed && !collectionScanning && root != null && BuildCleanupFromCollection(CollectionState(root)).Items.Count > 0;
         recycleRejectedButton.IsHitTestVisible = enabled;
         recycleRejectedButton.Opacity = enabled ? 1.0 : 0.52;
     }
@@ -1831,7 +2049,7 @@ internal sealed class MainWindow : Window
         title.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         title.Children.Add(SectionTitle("图库"));
         var topRight = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-        galleryCaption.Text = tileFiles.Count > 0 ? tileFiles.Count + " 张 JPG · 单击选择，双击进入单张视图" : "创建分类后，这里会显示缩略图。";
+        galleryCaption.Text = tileFiles.Count > 0 ? tileFiles.Count + " 张 JPG · 单击选择，双击进入单张视图" : "选择集合目录后，递归显示 JPG。";
         galleryCaption.Foreground = Brush("#66778B");
         galleryCaption.VerticalAlignment = VerticalAlignment.Center;
         topRight.Children.Add(galleryCaption);
@@ -2881,31 +3099,7 @@ internal sealed class MainWindow : Window
             return;
         }
 
-        if (singleViewMode)
-        {
-            var root = RootFolder(false);
-            var sessionFiles = root == null
-                ? new List<string>()
-                : FilesIn(Path.Combine(root, "jpg")).Where(IsJpg).ToList();
-            if (String.IsNullOrWhiteSpace(currentSingleFile) || !sessionFiles.Contains(currentSingleFile, StringComparer.OrdinalIgnoreCase))
-                currentSingleFile = sessionFiles.FirstOrDefault();
-            if (String.IsNullOrWhiteSpace(currentSingleFile))
-            {
-                singleViewMode = false;
-                RebuildUi();
-                return;
-            }
-            // The constructor deliberately built only a lightweight grid shell.
-            // Build the real single-photo controls now that the window is visible.
-            RebuildUi();
-            ShowPhotoInfo(currentSingleFile);
-        }
-        else
-        {
-            ScanDirectory();
-            RefreshGallery();
-            RestoreGridCurrentPhoto();
-        }
+        restoringCollectionSession=true;RefreshCurrentFolder();
     }
 
     private void LoadCullMarks()
@@ -2938,21 +3132,16 @@ internal sealed class MainWindow : Window
             // Recover a completed R operation if the process stopped after recycling its JPG.
             foreach (var jpg in rawOnlyFiles.Where(file => !File.Exists(file)).ToList())
             {
-                var parent = Path.GetDirectoryName(jpg);
-                if (!String.Equals(Path.GetFileName(parent), "jpg", StringComparison.OrdinalIgnoreCase)) continue;
-                var rawFolder = Path.Combine(Path.GetDirectoryName(parent), "arw");
-                if (retainedRawFiles.Any(raw => InFolder(raw, rawFolder) && File.Exists(raw) &&
-                    String.Equals(Stem(raw), Stem(jpg), StringComparison.OrdinalIgnoreCase))) rawOnlyFiles.Remove(jpg);
+                if (retainedRawFiles.Any(raw => File.Exists(raw) && String.Equals(PhotoCollection.AbsolutePairKey(raw),
+                    PhotoCollection.AbsolutePairKey(jpg),StringComparison.OrdinalIgnoreCase))) rawOnlyFiles.Remove(jpg);
             }
             // A K record is only meaningful once its JPG has gone. If an interrupted
             // R operation was later changed to another decision while the JPG still
             // existed, do not let the old survivor intent reappear on a reused path.
             foreach (var raw in retainedRawFiles.ToList())
             {
-                var rawParent = Path.GetDirectoryName(raw);
-                if (!String.Equals(Path.GetFileName(rawParent), "arw", StringComparison.OrdinalIgnoreCase)) continue;
-                var jpgFolder = Path.Combine(Path.GetDirectoryName(rawParent), "jpg");
-                var jpg = FilesIn(jpgFolder).FirstOrDefault(file => IsJpg(file) && String.Equals(Stem(file), Stem(raw), StringComparison.OrdinalIgnoreCase));
+                string scope=Path.GetDirectoryName(PhotoCollection.AbsolutePairKey(raw));
+                var jpg = PhotoCollection.ReadPairScope(scope,raw).Photos.Where(p=>p.IsJpg&&String.Equals(PhotoCollection.AbsolutePairKey(p.AbsolutePath),PhotoCollection.AbsolutePairKey(raw),StringComparison.OrdinalIgnoreCase)).Select(p=>p.AbsolutePath).FirstOrDefault();
                 if (jpg != null && DecisionOf(jpg) != "R") retainedRawFiles.Remove(raw);
             }
         }
@@ -3022,11 +3211,7 @@ internal sealed class MainWindow : Window
     private void RemoveRetainedRawIntentForJpg(string jpg)
     {
         if (String.IsNullOrWhiteSpace(jpg)) return;
-        var parent = Path.GetDirectoryName(jpg);
-        if (!String.Equals(Path.GetFileName(parent), "jpg", StringComparison.OrdinalIgnoreCase)) return;
-        var rawFolder = Path.Combine(Path.GetDirectoryName(parent), "arw");
-        foreach (var raw in retainedRawFiles.Where(raw => InFolder(raw, rawFolder)
-            && String.Equals(Stem(raw), Stem(jpg), StringComparison.OrdinalIgnoreCase)).ToList())
+        foreach (var raw in retainedRawFiles.Where(raw => String.Equals(PhotoCollection.AbsolutePairKey(raw),PhotoCollection.AbsolutePairKey(jpg),StringComparison.OrdinalIgnoreCase)).ToList())
             retainedRawFiles.Remove(raw);
     }
 
@@ -3034,7 +3219,7 @@ internal sealed class MainWindow : Window
     {
         if (galleryFiles.Count > 0) return;
         var root = RootFolder(false);
-        if (root != null) galleryFiles.AddRange(SortGalleryFiles(FilesIn(Path.Combine(root, "jpg")).Where(IsJpg)));
+        if (root != null) galleryFiles.AddRange(SortGalleryFiles(CollectionJpgs(root)));
     }
 
     private List<string> SortGalleryFiles(IEnumerable<string> files)
@@ -3043,13 +3228,13 @@ internal sealed class MainWindow : Window
         switch (gallerySortMode)
         {
             case "name_desc":
-                return source.OrderByDescending(Path.GetFileName, StringComparer.OrdinalIgnoreCase).ToList();
+                return source.OrderByDescending(Path.GetFileName, StringComparer.OrdinalIgnoreCase).ThenBy(p=>p,StringComparer.OrdinalIgnoreCase).ToList();
             case "capture_asc":
-                return source.OrderBy(CaptureSortBucket).ThenBy(CaptureSortValue).ThenBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase).ToList();
+                return source.OrderBy(CaptureSortBucket).ThenBy(CaptureSortValue).ThenBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase).ThenBy(p=>p,StringComparer.OrdinalIgnoreCase).ToList();
             case "capture_desc":
-                return source.OrderBy(CaptureSortBucket).ThenByDescending(CaptureSortValue).ThenBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase).ToList();
+                return source.OrderBy(CaptureSortBucket).ThenByDescending(CaptureSortValue).ThenBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase).ThenBy(p=>p,StringComparer.OrdinalIgnoreCase).ToList();
             default:
-                return source.OrderBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase).ToList();
+                return source.OrderBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase).ThenBy(p=>p,StringComparer.OrdinalIgnoreCase).ToList();
         }
     }
 
@@ -3224,7 +3409,7 @@ internal sealed class MainWindow : Window
 
     private bool FolderStartsInCullMode(string root)
     {
-        var jpgs = FilesIn(Path.Combine(root, "jpg")).Where(IsJpg).ToList();
+        var jpgs = CollectionJpgs(root);
         return jpgs.Count == 0 || jpgs.Any(file => !IsDecided(file));
     }
 
@@ -3237,134 +3422,107 @@ internal sealed class MainWindow : Window
     {
         var root = RootFolder(false);
         if (root == null) return;
+        if(collectionUiEnabled&&(collection==null||!GpsFileSafety.Same(collection.Root,root))) {if(!collectionScanning)RefreshCurrentFolder();return;}
         InitializeNavigationForFolder(root);
         RememberFolder(root);
-        var topLevel = FilesIn(root).ToList();
-        var pendingJpg = topLevel.Count(IsJpg);
-        var pendingRaw = topLevel.Count(IsRaw);
-        var jpgFolder = Path.Combine(root, "jpg");
-        var rawFolder = Path.Combine(root, "arw");
-        var jpgTotal = FilesIn(jpgFolder).Count(IsJpg);
-        var rawTotal = FilesIn(rawFolder).Count(IsRaw);
+        var snapshot=CollectionState(root);
+        var jpgTotal=snapshot.Photos.Count(p=>p.IsJpg);
+        var rawTotal=snapshot.Photos.Count-jpgTotal;
         jpgCount.Text = jpgTotal.ToString("N0") + " 张";
         rawCount.Text = rawTotal.ToString("N0") + " 张";
-        pendingCount.Text = (pendingJpg + pendingRaw).ToString("N0") + " 个";
+        pendingCount.Text = snapshot.PendingCount.ToString("N0") + " 个";
         UpdateCullProgress();
-        organizeButton.IsHitTestVisible = pendingJpg + pendingRaw > 0;
-        organizeButton.Opacity = pendingJpg + pendingRaw > 0 ? 1.0 : 0.52;
-        unorganizeButton.IsHitTestVisible = jpgTotal + rawTotal > 0;
-        unorganizeButton.Opacity = jpgTotal + rawTotal > 0 ? 1.0 : 0.52;
-        folderHint.Text = pendingJpg + pendingRaw > 0 ? "目录顶层有待分类的照片" : "目录顶层没有待分类照片";
-        SetStatus("扫描完成：JPG " + jpgTotal + " 张，RAW " + rawTotal + " 张。", false);
+        int classified=snapshot.Photos.Count(p=>!p.IsUnclassified&&p.RelativeDirectory.Length>0);
+        organizeButton.IsHitTestVisible = !collectionScanning&&!classificationBusy&&snapshot.PendingCount>0;
+        organizeButton.IsEnabled=organizeButton.IsHitTestVisible;
+        organizeButton.Opacity = organizeButton.IsHitTestVisible?1.0:0.52;
+        unorganizeButton.IsHitTestVisible = !collectionScanning&&!classificationBusy&&classified>0;
+        unorganizeButton.IsEnabled=unorganizeButton.IsHitTestVisible;
+        unorganizeButton.Opacity = unorganizeButton.IsHitTestVisible?1.0:0.52;
+        folderHint.Text = "递归集合 · 待分类 "+snapshot.PendingCount+" 个；在各自父目录分类";
+        SetStatus("扫描完成：JPG " + jpgTotal + " 张，RAW " + rawTotal + " 张。"+(snapshot.Diagnostics.Count>0?" 已跳过不可访问/链接项 "+snapshot.Diagnostics.Count+" 项。":""), false);
     }
+
+    private PhotoCollection CollectionState(string root) {
+        if(collection!=null&&GpsFileSafety.Same(collection.Root,root))return collection;
+        // Headless model fixtures have no UI lifecycle. Real windows must never
+        // perform a recursive fallback scan on the Dispatcher.
+        return collectionUiEnabled?new PhotoCollection(root,new PhotoItem[0],new string[0]):PhotoCollection.Scan(root,CancellationToken.None);
+    }
+    private List<string> CollectionJpgs(string root) {return CollectionState(root).Photos.Where(p=>p.IsJpg).Select(p=>p.AbsolutePath).ToList();}
 
     private void OrganizeFiles(object sender, RoutedEventArgs e)
     {
-        var root = RootFolder(true);
-        if (root == null) return;
-        var files = FilesIn(root).ToList();
-        var jpgs = files.Where(IsJpg).ToList();
-        var raws = files.Where(IsRaw).ToList();
-        if (jpgs.Count == 0 && raws.Count == 0)
-        {
-            MessageBox.Show("所选目录顶层没有 JPG、JPEG 或 ARW 文件。", "没有可分类文件", MessageBoxButton.OK, MessageBoxImage.Information);
-            return;
-        }
-        var message = "将移动 " + jpgs.Count + " 个 JPG/JPEG 和 " + raws.Count + " 个 ARW：\n\n"
-                    + Path.Combine(root, "jpg") + "\n" + Path.Combine(root, "arw")
-                    + "\n\n同名文件不会被覆盖。继续吗？";
-        if (MessageBox.Show(message, "确认分类", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
-        Directory.CreateDirectory(Path.Combine(root, "jpg"));
-        Directory.CreateDirectory(Path.Combine(root, "arw"));
-        int moved = 0;
-        int skipped = 0;
-        foreach (var file in jpgs.Concat(raws))
-        {
-            var destination = Path.Combine(root, IsJpg(file) ? "jpg" : "arw", Path.GetFileName(file));
-            if (File.Exists(destination)) { skipped++; continue; }
-            try
-            {
-                File.Move(file, destination);
-                RemapPhotoState(file, destination);
-                moved++;
-            }
-            catch { skipped++; }
-        }
-        SaveCullMarks();
-        ScanDirectory();
-        RefreshGallery();
-        var result = "已分类 " + moved + " 个文件。" + (skipped > 0 ? " " + skipped + " 个未移动（同名文件或访问错误）。" : "");
-        SetStatus(result, false);
-        MessageBox.Show(result, "分类完成", MessageBoxButton.OK, MessageBoxImage.Information);
+        StartClassification(false);
     }
 
     private void UnorganizeFiles(object sender, RoutedEventArgs e)
     {
-        var root = RootFolder(true);
-        if (root == null) return;
-        var jpgFolder = Path.Combine(root, "jpg");
-        var rawFolder = Path.Combine(root, "arw");
-        var jpgs = FilesIn(jpgFolder).Where(IsJpg).ToList();
-        var raws = FilesIn(rawFolder).Where(IsRaw).ToList();
-        if (jpgs.Count == 0 && raws.Count == 0)
-        {
-            MessageBox.Show("jpg 与 arw 文件夹中没有可还原的照片。", "没有可取消的分类", MessageBoxButton.OK, MessageBoxImage.Information);
-            return;
-        }
-
-        var conflicts = jpgs.Concat(raws).Where(file => File.Exists(Path.Combine(root, Path.GetFileName(file)))).ToList();
-        if (conflicts.Count > 0)
-        {
-            var preview = String.Join("\n", conflicts.Take(8).Select(Path.GetFileName));
-            if (conflicts.Count > 8) preview += "\n……以及另外 " + (conflicts.Count - 8) + " 个文件";
-            MessageBox.Show("根目录已存在以下同名文件，取消分类已停止，未移动任何照片：\n\n" + preview,
-                "存在同名文件", MessageBoxButton.OK, MessageBoxImage.Warning);
-            return;
-        }
-
-        var message = "将把 " + jpgs.Count + " 个 JPG/JPEG 和 " + raws.Count + " 个 ARW 还原到：\n\n"
-                    + root + "\n\n此操作不会覆盖同名文件。继续吗？";
-        if (MessageBox.Show(message, "确认取消分类", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
-
-        int moved = 0;
-        var failures = new List<string>();
-        foreach (var file in jpgs.Concat(raws))
-        {
-            var destination = Path.Combine(root, Path.GetFileName(file));
-            try
-            {
-                if (File.Exists(destination)) failures.Add(Path.GetFileName(file) + "（根目录已有同名文件）");
-                else
-                {
-                    File.Move(file, destination);
-                    RemapPhotoState(file, destination);
-                    moved++;
-                }
-            }
-            catch (Exception ex) { failures.Add(Path.GetFileName(file) + "（" + ex.Message + "）"); }
-        }
-
-        SaveCullMarks();
-
-        TryDeleteEmptyPhotoFolder(jpgFolder);
-        TryDeleteEmptyPhotoFolder(rawFolder);
-
-        ScanDirectory();
-        RefreshGallery();
-        var result = "已还原 " + moved + " 个文件。";
-        if (failures.Count > 0) result += " " + failures.Count + " 个未移动：\n" + String.Join("\n", failures.Take(8));
-        SetStatus(result, failures.Count > 0);
-        MessageBox.Show(result, failures.Count > 0 ? "取消分类部分完成" : "取消分类完成", MessageBoxButton.OK,
-            failures.Count > 0 ? MessageBoxImage.Warning : MessageBoxImage.Information);
+        StartClassification(true);
     }
 
-    private static void TryDeleteEmptyPhotoFolder(string folder)
-    {
-        try
-        {
-            if (Directory.Exists(folder) && !Directory.EnumerateFileSystemEntries(folder).Any()) Directory.Delete(folder, false);
+    private void StartClassification(bool undo) {
+        string root=RootFolder(true);if(root==null||classificationBusy||gpsBusy||cullMarksReadFailed)return;
+        BeginClassificationContext();
+        var cancel=new CancellationTokenSource();bool finished=false;var body=new StackPanel();var text=GpsDialogText("正在递归检查分类计划…");body.Children.Add(text);
+        var stop=GpsSmallButton("取消剩余");body.Children.Add(stop);var window=GpsDialog(undo?"取消分类":"创建分类",body,520);
+        stop.Click+=delegate{cancel.Cancel();stop.IsEnabled=false;text.Text+="\n已请求取消；当前文件及状态保存完成后停止。";};
+        window.Closing+=delegate(object sender,System.ComponentModel.CancelEventArgs e){if(!finished){e.Cancel=true;cancel.Cancel();stop.IsEnabled=false;}};
+        window.Loaded+=async delegate {
+            ClassificationResult result=null;ClassificationPlan plan=null;string failure=null;
+            try {
+                plan=await Task.Factory.StartNew(delegate{return ClassificationPlan.Build(root,undo,cancel.Token);});
+                cancel.Token.ThrowIfCancellationRequested();
+                string summary="集合："+root+"\n\n可移动："+plan.ReadyCount+"\n冲突："+plan.ConflictCount+"\n跳过："+plan.Entries.Count(e=>e.Disposition=="skipped")+
+                    "\n\n"+(undo?"在每个类型目录自己的父目录内还原。":"在每张照片自己的父目录内创建 jpg / arw。")+"\n保留日期目录；不覆盖、不自动改名。";
+                if(plan.ReadyCount>0&&MessageBox.Show(window,summary,undo?"确认取消分类":"确认递归分类",MessageBoxButton.YesNo,MessageBoxImage.Question)!=MessageBoxResult.Yes)return;
+                result=await Task.Factory.StartNew(delegate{return ClassificationExecutor.Execute(plan,cancel.Token,delegate(string source,string destination){
+                    return (bool)Dispatcher.Invoke(new Func<bool>(delegate{return CommitClassificationMove(source,destination,SaveCullMarks);}));
+                },delegate(int i,int n,string file){Dispatcher.BeginInvoke(new Action(delegate{text.Text=(undo?"正在还原":"正在分类")+" "+i+" / "+n+"\n"+Path.GetFileName(file);}));});});
+            }catch(OperationCanceledException){}catch(Exception error){failure=error.Message;}
+            finally {
+                finished=true;window.Close();EndClassificationContext(result);
+                if(failure!=null)MessageBox.Show(this,failure,"分类未完成",MessageBoxButton.OK,MessageBoxImage.Warning);
+                else if(result!=null){
+                    var details=result.Conflicts.Concat(result.Skipped).Concat(result.Failed).Concat(plan.Diagnostics).ToList();
+                    string summary="成功："+result.Moved.Count+"\n冲突："+result.Conflicts.Count+"\n跳过："+result.Skipped.Count+"\n失败："+result.Failed.Count+
+                        (result.Cancelled?"\n已取消剩余。":"")+(details.Count>0?"\n\n"+String.Join("\n",details.Take(10)):"");
+                    MessageBox.Show(this,summary,undo?"取消分类完成":"分类完成",MessageBoxButton.OK,result.Failed.Count>0?MessageBoxImage.Warning:MessageBoxImage.Information);
+                }
+                cancel.Dispose();
+            }
+        };
+        window.ShowDialog();
+    }
+
+    private void BeginClassificationContext() {
+        classificationBusy=true;
+        if(collectionCancellation!=null)collectionCancellation.Cancel();Interlocked.Increment(ref collectionGeneration);
+        Interlocked.Increment(ref gpsDisplayGeneration);Interlocked.Increment(ref gpsContextEpoch);collectionScanning=false;gpsDirectoryRefreshing=false;
+        gpsRefreshSourcePath=gpsSession.Source==null?gpsRefreshSourcePath:gpsSession.Source.SourcePath;
+        if(gpsSourceWatcher!=null){gpsSourceWatcher.Dispose();gpsSourceWatcher=null;}if(gpsSourcePoll!=null)gpsSourcePoll.Stop();
+    }
+    private void EndClassificationContext(ClassificationResult result) {
+        classificationBusy=false;
+        if(result!=null&&result.Moved.Count>0)RemoveImageCachesForPaths(result.Moved.Keys.Concat(result.Moved.Values));
+        gpsSession.Clear();WatchGpsSource();RefreshCurrentFolder();
+    }
+
+    private bool CommitClassificationMove(string source,string destination,Func<bool> persist) {
+        var sets=new[]{pickedFiles,jpgOnlyFiles,rawOnlyFiles,rejectedFiles,retainedRawFiles,selectedFiles};
+        var prior=sets.Select(s=>Tuple.Create(s.Contains(source),s.Contains(destination))).ToArray();string current=currentSingleFile;
+        try {
+            for(int i=0;i<sets.Length;i++){sets[i].Remove(source);sets[i].Remove(destination);if(prior[i].Item1)sets[i].Add(destination);}
+            if(String.Equals(currentSingleFile,source,StringComparison.OrdinalIgnoreCase))currentSingleFile=destination;
+            if(!persist())throw new IOException("无法保存路径迁移状态");
+        }catch {
+            for(int i=0;i<sets.Length;i++){sets[i].Remove(source);sets[i].Remove(destination);if(prior[i].Item1)sets[i].Add(source);if(prior[i].Item2)sets[i].Add(destination);}
+            currentSingleFile=current;return false;
         }
-        catch { }
+        if(gpsRefreshSourcePath!=null&&GpsFileSafety.Same(gpsRefreshSourcePath,source))gpsRefreshSourcePath=destination;
+        foreach(var tile in tileFiles.Where(p=>String.Equals(p.Value,source,StringComparison.OrdinalIgnoreCase)).Select(p=>p.Key).ToArray())tileFiles[tile]=destination;
+        gpsDisplayCache.Remove(source);gpsDisplayCache.Remove(destination);
+        return true;
     }
 
     private void RemapPhotoState(string source, string destination)
@@ -3383,8 +3541,7 @@ internal sealed class MainWindow : Window
         ClearGallery();
         var root = RootFolder(false);
         if (root == null) return;
-        var jpgFolder = Path.Combine(root, "jpg");
-        var sourceJpgs = FilesIn(jpgFolder).Where(IsJpg).ToList();
+        var sourceJpgs = CollectionJpgs(root);
         if ((gallerySortMode == "capture_asc" || gallerySortMode == "capture_desc") && sourceJpgs.Any(file => !IsCaptureDateCached(file)))
         {
             var version = galleryThumbnailLoadVersion;
@@ -3420,7 +3577,7 @@ internal sealed class MainWindow : Window
         var visibleJpgs = jpgs.Where(MatchesFilter).ToList();
         if (visibleJpgs.Count == 0)
         {
-            gallery.Children.Add(new TextBlock { Text = jpgs.Count == 0 ? "这里还没有 JPG。点击“创建分类”即可。" : "当前筛选没有匹配的照片。", Margin = new Thickness(20), FontSize = 15, Foreground = Brush("#6A7787") });
+            gallery.Children.Add(new TextBlock { Text = jpgs.Count == 0 ? (collectionScanning?"正在递归扫描集合…":"此集合没有可浏览的 JPG/JPEG。") : "当前筛选没有匹配的照片。", Margin = new Thickness(20), FontSize = 15, Foreground = Brush("#6A7787") });
             galleryCaption.Text = jpgs.Count == 0 ? "没有可浏览的 JPG" : "筛选：" + FilterLabel() + " · 0 张";
             return;
         }
@@ -3448,14 +3605,16 @@ internal sealed class MainWindow : Window
         // initialized. GPS session identity must not decide whether to discard
         // that view's current photo, selection or browse/cull mode.
         bool sameRoot=root!=null&&(String.Equals(root,navigationRoot,StringComparison.OrdinalIgnoreCase)||
-            (navigationRoot==null&&((currentSingleFile!=null&&InFolder(currentSingleFile,Path.Combine(root,"jpg")))||
-                galleryFiles.Any(f=>InFolder(f,Path.Combine(root,"jpg"))))));
+            (navigationRoot==null&&((currentSingleFile!=null&&PhotoCollection.ContainsPath(root,currentSingleFile))||
+                galleryFiles.Any(f=>PhotoCollection.ContainsPath(root,f)))));
         if(!String.Equals(root,gpsSession.Root,StringComparison.OrdinalIgnoreCase))SelectGpsRoot(root);
         if(sameRoot&&navigationRoot==null)navigationRoot=root;
         var previousSingleFile = currentSingleFile;
 
         if (root == null)
         {
+            if(collectionCancellation!=null)collectionCancellation.Cancel();Interlocked.Increment(ref collectionGeneration);
+            collectionScanning=false;gpsDirectoryRefreshing=false;collection=null;
             navigationRoot = null;
             advanceToUndecided = true;
             currentSingleFile = null;
@@ -3464,23 +3623,39 @@ internal sealed class MainWindow : Window
             return;
         }
 
-        ScanDirectory();
-        var files=FilesIn(Path.Combine(root,"jpg")).Where(IsJpg).ToList();
-        BeginGpsDirectoryRefresh(root,files);
-        // Retain the existing asynchronous capture-date preload for newly added
-        // files. Sorting must not make the GPS refresh block the UI thread.
-        if((gallerySortMode=="capture_asc"||gallerySortMode=="capture_desc")&&files.Any(f=>!IsCaptureDateCached(f))) {
-            int generation=gpsDisplayGeneration;
-            Task.Factory.StartNew(delegate {PreloadGalleryMetadata(files);}).ContinueWith(delegate(Task task) {
-                if(Dispatcher.HasShutdownStarted)return;
-                Dispatcher.BeginInvoke(new Action(delegate {
-                    if(generation!=gpsDisplayGeneration)return;
-                    RefreshDirectoryView(SortGalleryFiles(files),currentSingleFile,sameRoot);
-                }));
-            });
-            UpdateGpsLine();return;
-        }
-        RefreshDirectoryView(SortGalleryFiles(files),previousSingleFile,sameRoot);
+        if(collectionCancellation!=null)collectionCancellation.Cancel();
+        var cancel=new CancellationTokenSource();collectionCancellation=cancel;
+        int generation=Interlocked.Increment(ref collectionGeneration);
+        Interlocked.Increment(ref gpsDisplayGeneration);Interlocked.Increment(ref gpsContextEpoch);
+        gpsDisplayPending.Clear();gpsDirectoryRefreshing=true;collectionScanning=true;
+        if(collection==null||!GpsFileSafety.Same(collection.Root,root))collection=new PhotoCollection(root,new PhotoItem[0],new string[0]);
+        organizeButton.IsHitTestVisible=false;unorganizeButton.IsHitTestVisible=false;
+        organizeButton.Opacity=unorganizeButton.Opacity=0.52;
+        UpdateRejectedButtonState();SetStatus("正在递归扫描集合…",false);
+        bool capture=gallerySortMode=="capture_asc"||gallerySortMode=="capture_desc";
+        Task.Factory.StartNew(delegate {
+            var found=PhotoCollection.Scan(root,cancel.Token);
+            if(capture)foreach(var item in found.Photos.Where(p=>p.IsJpg)) {cancel.Token.ThrowIfCancellationRequested();if(!IsCaptureDateCached(item.AbsolutePath))LoadGalleryMetadata(item.AbsolutePath);}
+            cancel.Token.ThrowIfCancellationRequested();return found;
+        },cancel.Token).ContinueWith(delegate(Task<PhotoCollection> task) {
+            if(Dispatcher.HasShutdownStarted)return;
+            Dispatcher.BeginInvoke(new Action(delegate {
+                if(generation!=collectionGeneration||cancel.IsCancellationRequested||!String.Equals(RootFolder(false),root,StringComparison.OrdinalIgnoreCase))return;
+                collectionScanning=false;
+                if(task.Status!=TaskStatus.RanToCompletion){gpsDirectoryRefreshing=false;SetStatus("集合扫描未完成，请重新刷新。",true);return;}
+                collection=task.Result;ScanDirectory();
+                var files=collection.Photos.Where(p=>p.IsJpg).Select(p=>p.AbsolutePath).ToList();
+                BeginGpsDirectoryRefresh(root,files);
+                RefreshDirectoryView(SortGalleryFiles(files),sameRoot?currentSingleFile:previousSingleFile,sameRoot);
+                // Startup initially has only a grid shell, even when restoring
+                // a single-photo session. Build it once after the scan completes.
+                if(restoringCollectionSession){
+                    restoringCollectionSession=false;
+                    if(singleViewMode&&currentSingleFile!=null){RebuildUi();ShowPhotoInfo(currentSingleFile);}
+                    else if(!singleViewMode&&currentSingleFile!=null)RestoreGridCurrentPhoto();
+                }
+            }));
+        });
     }
 
     private void RefreshDirectoryView(List<string> files,string previousSingleFile,bool sameRoot) {
@@ -3547,28 +3722,8 @@ internal sealed class MainWindow : Window
             return;
         }
 
-        ScanDirectory();
-        if (singleViewMode)
-        {
-            ClearGallery();
-            EnsureGalleryFiles();
-            currentSingleFile = !String.IsNullOrWhiteSpace(preferredFile) && galleryFiles.Contains(preferredFile, StringComparer.OrdinalIgnoreCase)
-                ? preferredFile : galleryFiles.FirstOrDefault();
-            if (String.IsNullOrWhiteSpace(currentSingleFile))
-            {
-                singleViewMode = false;
-                RebuildUi();
-                return;
-            }
-            fitSingleImage = true;
-            RebuildUi();
-            ShowPhotoInfo(currentSingleFile);
-            return;
-        }
-
         currentSingleFile = preferredFile;
-        RefreshGallery();
-        RestoreGridCurrentPhoto();
+        RefreshCurrentFolder();
     }
 
     private void ClearGallery()
@@ -3995,9 +4150,9 @@ internal sealed class MainWindow : Window
         if (!becameUndecided && (decision == "P" || decision == "R"))
         {
             var root = RootFolder(false);
-            var partners = root == null ? new List<string>() : FilesIn(Path.Combine(root, "arw")).Where(IsRaw)
-                .Where(raw => String.Equals(Stem(raw), Stem(file), StringComparison.OrdinalIgnoreCase)).ToList();
-            if (partners.Count != 1)
+            var pairs = root == null ? null : PhotoCollection.ReadPairScope(root,file);
+            var key=root==null?null:new PhotoItem(root,file).PairKey;
+            if (pairs==null||!pairs.RawPairs.ContainsKey(key)||pairs.RawPairs[key].Count!=1||!pairs.JpgPairs.ContainsKey(key)||pairs.JpgPairs[key].Count!=1||pairs.Diagnostics.Count>0)
             {
                 MessageBox.Show("没有找到唯一的同名 RAW。请先进行文件对应检查；仅有 JPG 时可选择 J。", "无法保留 RAW", MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
@@ -4166,7 +4321,7 @@ internal sealed class MainWindow : Window
         if (galleryFiles.Count == 0)
         {
             var root = RootFolder(false);
-            if (root != null) galleryFiles.AddRange(SortGalleryFiles(FilesIn(Path.Combine(root, "jpg")).Where(IsJpg)));
+            if (root != null) galleryFiles.AddRange(SortGalleryFiles(CollectionJpgs(root)));
         }
         var index = galleryFiles.FindIndex(item => String.Equals(item, currentSingleFile, StringComparison.OrdinalIgnoreCase));
         if (index < 0 || galleryFiles.Count == 0) return;
@@ -4641,12 +4796,6 @@ internal sealed class MainWindow : Window
         public readonly List<string> Issues = new List<string>();
     }
 
-    private static bool InFolder(string file, string folder)
-    {
-        return String.Equals(Path.GetDirectoryName(Path.GetFullPath(file)),
-            Path.GetFullPath(folder).TrimEnd(Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase);
-    }
-
     private static string FileStamp(string file)
     {
         if (String.IsNullOrEmpty(file) || !File.Exists(file)) return null;
@@ -4662,40 +4811,37 @@ internal sealed class MainWindow : Window
     private List<string> CompletedRawOnlyInRoot(string root)
     {
         if (String.IsNullOrWhiteSpace(root)) return new List<string>();
-        var jpgStems = new HashSet<string>(FilesIn(Path.Combine(root, "jpg")).Where(IsJpg).Select(Stem), StringComparer.OrdinalIgnoreCase);
-        return FilesIn(Path.Combine(root, "arw")).Where(IsRaw)
-            .Where(raw => retainedRawFiles.Contains(raw) && !jpgStems.Contains(Stem(raw))).ToList();
+        var snapshot=CollectionState(root);
+        return snapshot.Photos.Where(p=>!p.IsJpg&&retainedRawFiles.Contains(p.AbsolutePath)&&!snapshot.JpgPairs.ContainsKey(p.PairKey)).Select(p=>p.AbsolutePath).ToList();
     }
 
     private CleanupPlan BuildCleanupPlan(string root)
     {
-        var plan = new CleanupPlan { Root = Path.GetFullPath(root) };
-        var jpgFolder = Path.Combine(plan.Root, "jpg");
-        var rawFolder = Path.Combine(plan.Root, "arw");
-        if ((Directory.Exists(jpgFolder) && HasReparsePoint(jpgFolder)) ||
-            (Directory.Exists(rawFolder) && HasReparsePoint(rawFolder)))
+        return BuildCleanupFromCollection(PhotoCollection.Scan(root,CancellationToken.None));
+    }
+
+    private CleanupPlan BuildCleanupFromCollection(PhotoCollection snapshot)
+    {
+        var plan = new CleanupPlan { Root = snapshot.Root };
+        plan.Issues.AddRange(snapshot.Diagnostics);
+        // Incomplete enumeration is fine for browsing, not evidence of an
+        // absent partner. A cleanup plan must be complete or fail closed.
+        if(snapshot.Diagnostics.Count>0)return plan;
+        foreach (var group in snapshot.JpgPairs)
         {
-            plan.Issues.Add("jpg / arw 是链接目录，请选择实际照片目录后重新检查。");
-            return plan;
-        }
-        var jpgs = FilesIn(jpgFolder).Where(IsJpg).ToList();
-        var rawGroups = FilesIn(rawFolder).Where(IsRaw).GroupBy(Stem, StringComparer.OrdinalIgnoreCase)
-            .ToDictionary(group => group.Key, group => group.ToList(), StringComparer.OrdinalIgnoreCase);
-        foreach (var group in jpgs.GroupBy(Stem, StringComparer.OrdinalIgnoreCase))
-        {
-            var marked = group.Where(file => new[] { "J", "R", "X" }.Contains(DecisionOf(file))).ToList();
+            var marked = group.Value.Select(p=>p.AbsolutePath).Where(file => new[] { "J", "R", "X" }.Contains(DecisionOf(file))).ToList();
             if (marked.Count == 0) continue;
-            List<string> raws;
-            if (!rawGroups.TryGetValue(group.Key, out raws)) raws = new List<string>();
-            if (group.Count() != 1 || raws.Count > 1)
+            List<PhotoItem> raws;
+            if (!snapshot.RawPairs.TryGetValue(group.Key, out raws)) raws = new List<PhotoItem>();
+            if (group.Value.Count != 1 || raws.Count > 1)
             {
                 plan.Issues.Add(group.Key + "：同名主体存在多个文件，未加入清理。");
                 continue;
             }
             var jpg = marked[0];
-            var raw = raws.FirstOrDefault();
+            var raw = raws.Count==0?null:raws[0].AbsolutePath;
             var decision = DecisionOf(jpg);
-            if (HasReparsePoint(jpg) || (raw != null && HasReparsePoint(raw)))
+            if (!PhotoCollection.SafePath(jpg) || (raw != null && !PhotoCollection.SafePath(raw)))
             {
                 plan.Issues.Add(group.Key + "：文件是链接，未加入清理。");
                 continue;
@@ -4716,7 +4862,7 @@ internal sealed class MainWindow : Window
         if (cullMarksReadFailed) return;
         var root = RootFolder(false);
         if (root == null) return;
-        var files = FilesIn(Path.Combine(root, "jpg")).Where(IsJpg).Where(selectedFiles.Contains).ToList();
+        var files = CollectionJpgs(root).Where(selectedFiles.Contains).ToList();
         if (files.Count == 0) return;
         var previous = files.ToDictionary(file => file, DecisionOf, StringComparer.OrdinalIgnoreCase);
         foreach (var file in files) SetDecision(file, "X");
@@ -4740,11 +4886,14 @@ internal sealed class MainWindow : Window
         SetStatus("已将 " + files.Count + " 张选中照片标记为废片；执行清理前不会移动文件。", false);
     }
 
-    private void RecycleRejectedPairs(object sender, RoutedEventArgs e)
+    private async void RecycleRejectedPairs(object sender, RoutedEventArgs e)
     {
         var root = RootFolder(true);
         if (root == null || cullMarksReadFailed) return;
-        var plan = BuildCleanupPlan(root);
+        int generation=collectionGeneration;
+        var snapshot=await Task.Factory.StartNew(delegate {return PhotoCollection.Scan(root,CancellationToken.None);});
+        if(generation!=collectionGeneration||!String.Equals(root,RootFolder(false),StringComparison.OrdinalIgnoreCase))return;
+        var plan = BuildCleanupFromCollection(snapshot);
         if (plan.Items.Count == 0)
         {
             MessageBox.Show("当前目录没有待执行的 J / R / X 清理。" +
@@ -4766,7 +4915,7 @@ internal sealed class MainWindow : Window
         EnsureGalleryFiles();
         var orderedBefore = galleryFiles.ToList();
         if (orderedBefore.Count == 0)
-            orderedBefore = SortGalleryFiles(FilesIn(Path.Combine(root, "jpg")).Where(IsJpg));
+            orderedBefore = SortGalleryFiles(CollectionJpgs(root));
         var activeBefore = ActivePhotoFile();
         var result = ExecuteCleanupPlan(plan, MoveToRecycleBin, SaveCullMarks);
         var preferred = PreferredPhotoAfterCleanup(orderedBefore, activeBefore, result.SuccessPaths);
@@ -4781,16 +4930,16 @@ internal sealed class MainWindow : Window
         if (!persist()) { result.Notes.Add("无法保存决定，本次未开始清理。"); return result; }
         foreach (var item in plan.Items)
         {
-            var current = BuildCleanupPlan(plan.Root).Items.FirstOrDefault(candidate =>
+            var current = BuildCleanupFromCollection(PhotoCollection.ReadPairScope(plan.Root,item.Jpg)).Items.FirstOrDefault(candidate =>
                 String.Equals(candidate.Jpg, item.Jpg, StringComparison.OrdinalIgnoreCase));
             // Never act on a changed file/decision or on a path outside the confirmed root.
             if (current == null || !String.Equals(current.Raw, item.Raw, StringComparison.OrdinalIgnoreCase) ||
-                !InFolder(item.Jpg, Path.Combine(plan.Root, "jpg")) ||
-                (item.Raw != null && !InFolder(item.Raw, Path.Combine(plan.Root, "arw"))) ||
+                !PhotoCollection.ContainsPath(plan.Root,item.Jpg) ||
+                (item.Raw != null && (!PhotoCollection.ContainsPath(plan.Root,item.Raw)||!String.Equals(new PhotoItem(plan.Root,item.Jpg).PairKey,new PhotoItem(plan.Root,item.Raw).PairKey,StringComparison.OrdinalIgnoreCase))) ||
                 DecisionOf(item.Jpg) != item.Decision ||
                 FileStamp(item.Jpg) != item.JpgStamp || FileStamp(item.Jpg) == null ||
                 FileStamp(item.Raw) != item.RawStamp ||
-                HasReparsePoint(item.Jpg) || (item.Raw != null && File.Exists(item.Raw) && HasReparsePoint(item.Raw)))
+                !PhotoCollection.SafePath(item.Jpg) || (item.Raw != null && !PhotoCollection.SafePath(item.Raw)))
             {
                 result.Notes.Add(Path.GetFileName(item.Jpg) + "：文件或决定已变化，本组未处理，请重新检查。");
                 continue;
@@ -4849,11 +4998,17 @@ internal sealed class MainWindow : Window
 
     private CorrespondenceReport InspectCorrespondence(string root)
     {
+        return InspectCollectionCorrespondence(PhotoCollection.Scan(root,CancellationToken.None));
+    }
+
+    private CorrespondenceReport InspectCollectionCorrespondence(PhotoCollection snapshot)
+    {
+        string root=snapshot.Root;
         var report = new CorrespondenceReport();
-        var jpgs = FilesIn(Path.Combine(root, "jpg")).Where(IsJpg).ToList();
-        var raws = FilesIn(Path.Combine(root, "arw")).Where(IsRaw).ToList();
-        var jpgGroups = jpgs.GroupBy(Stem, StringComparer.OrdinalIgnoreCase).ToDictionary(g => g.Key, g => g.ToList(), StringComparer.OrdinalIgnoreCase);
-        var rawGroups = raws.GroupBy(Stem, StringComparer.OrdinalIgnoreCase).ToDictionary(g => g.Key, g => g.ToList(), StringComparer.OrdinalIgnoreCase);
+        report.Issues.AddRange(snapshot.Diagnostics);
+        var jpgGroups = snapshot.JpgPairs.ToDictionary(g=>g.Key,g=>g.Value.Select(p=>p.AbsolutePath).ToList(),StringComparer.OrdinalIgnoreCase);
+        var rawGroups = snapshot.RawPairs.ToDictionary(g=>g.Key,g=>g.Value.Select(p=>p.AbsolutePath).ToList(),StringComparer.OrdinalIgnoreCase);
+        var raws=snapshot.Photos.Where(p=>!p.IsJpg).Select(p=>p.AbsolutePath).ToList();
         foreach (var stem in jpgGroups.Keys.Concat(rawGroups.Keys).Distinct(StringComparer.OrdinalIgnoreCase))
         {
             List<string> js, rs;
@@ -4879,23 +5034,26 @@ internal sealed class MainWindow : Window
             }
         }
         foreach (var file in pickedFiles.Concat(jpgOnlyFiles).Concat(rawOnlyFiles).Concat(rejectedFiles)
-            .Where(file => InFolder(file, Path.Combine(root, "jpg")) && !File.Exists(file)))
+            .Where(file => PhotoCollection.ContainsPath(root,file) && !File.Exists(file)))
         {
             var expectedRawSurvived = rawOnlyFiles.Contains(file) && raws.Any(raw =>
-                retainedRawFiles.Contains(raw) && String.Equals(Stem(raw), Stem(file), StringComparison.OrdinalIgnoreCase));
+                retainedRawFiles.Contains(raw) && String.Equals(new PhotoItem(root,raw).PairKey,new PhotoItem(root,file).PairKey,StringComparison.OrdinalIgnoreCase));
             if (!expectedRawSurvived) report.Issues.Add(Path.GetFileName(file) + "：仍有决定记录，但 JPG 已不存在。");
         }
-        foreach (var raw in retainedRawFiles.Where(raw => InFolder(raw, Path.Combine(root, "arw")) && !File.Exists(raw)))
+        foreach (var raw in retainedRawFiles.Where(raw => PhotoCollection.ContainsPath(root,raw) && !File.Exists(raw)))
             report.Issues.Add(Path.GetFileName(raw) + "：记录为仅 RAW 保留，但 RAW 已不存在。");
         return report;
     }
 
-    private void CheckMissingPairs(object sender, RoutedEventArgs e)
+    private async void CheckMissingPairs(object sender, RoutedEventArgs e)
     {
         var root = RootFolder(true);
         if (root == null) return;
-        var report = InspectCorrespondence(root);
-        var plan = BuildCleanupPlan(root);
+        int generation=collectionGeneration;
+        var snapshot=await Task.Factory.StartNew(delegate {return PhotoCollection.Scan(root,CancellationToken.None);});
+        if(generation!=collectionGeneration||!String.Equals(root,RootFolder(false),StringComparison.OrdinalIgnoreCase))return;
+        var report = InspectCollectionCorrespondence(snapshot);
+        var plan = BuildCleanupFromCollection(snapshot);
         var text = "完整配对：" + report.Paired + "\n仅 JPG：" + report.JpgOnly + "\n仅 RAW：" + report.RawOnly +
             "\n异常：" + report.Issues.Count + "\n\n待执行清理：" + plan.Items.Count + " 组" +
             "\n未记录保留意图的单格式：" + report.UnrecordedSingles +
@@ -4962,7 +5120,7 @@ internal sealed class MainWindow : Window
     private string RootFolder(bool notify)
     {
         var root = folderBox.Text.Trim();
-        if (Directory.Exists(root)) return root;
+        if (Directory.Exists(root)) return PhotoCollection.Normalize(root);
         if (notify) MessageBox.Show("请选择一个有效的照片目录。", "请选择目录", MessageBoxButton.OK, MessageBoxImage.Information);
         return null;
     }
@@ -5048,15 +5206,6 @@ internal sealed class MainWindow : Window
 
     private static bool IsJpg(string path) { return JpgExtensions.Contains(Path.GetExtension(path), StringComparer.OrdinalIgnoreCase); }
     private static bool IsRaw(string path) { return RawExtensions.Contains(Path.GetExtension(path), StringComparer.OrdinalIgnoreCase); }
-    private static string Stem(string path) { return Path.GetFileNameWithoutExtension(path); }
-
-    private static Dictionary<string, string> RawByStem(string folder)
-    {
-        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var raw in FilesIn(folder).Where(IsRaw)) if (!result.ContainsKey(Stem(raw))) result.Add(Stem(raw), raw);
-        return result;
-    }
-
     private void ShowPhotoInfo(string file)
     {
         var date = "—";
@@ -5175,7 +5324,7 @@ internal sealed class MainWindow : Window
         var presenter=new FrameworkElementFactory(typeof(ContentPresenter));presenter.SetValue(ContentPresenter.HorizontalAlignmentProperty,HorizontalAlignment.Center);presenter.SetValue(ContentPresenter.VerticalAlignmentProperty,VerticalAlignment.Center);border.AppendChild(presenter);var template=new ControlTemplate(typeof(Button)){VisualTree=border};var disabled=new Trigger{Property=UIElement.IsEnabledProperty,Value=false};disabled.Setters.Add(new Setter(UIElement.OpacityProperty,0.5));template.Triggers.Add(disabled);b.Template=template;return b;
     }
     private bool IsGpsSource(string file){return !String.IsNullOrEmpty(file)&&gpsSession.Source!=null&&GpsFileSafety.Same(file,gpsSession.Source.SourcePath);}
-    private bool IsLegalGpsCandidate(string file){try{return !IsGpsSource(file)&&GpsFileSafety.IsJpg(file)&&gpsSession.Root!=null&&GpsFileSafety.Same(Path.GetDirectoryName(file),Path.Combine(gpsSession.Root,"jpg"))&&File.Exists(file);}catch{return false;}}
+    private bool IsLegalGpsCandidate(string file){try{return !collectionScanning&&!IsGpsSource(file)&&GpsFileSafety.IsJpg(file)&&gpsSession.Root!=null&&PhotoCollection.ContainsPath(gpsSession.Root,file)&&PhotoCollection.SafePath(file)&&File.Exists(file);}catch{return false;}}
     private string[] SelectedGpsFiles(string clicked) {
         if(singleViewMode)return String.IsNullOrEmpty(clicked??currentSingleFile)?new string[0]:new[]{clicked??currentSingleFile};
         if(clicked!=null&&!selectedFiles.Contains(clicked))return new[]{clicked};
@@ -5222,8 +5371,7 @@ internal sealed class MainWindow : Window
         string source=gpsSession.Source==null?gpsRefreshSourcePath:gpsSession.Source.SourcePath;
         gpsSession.Clear();WatchGpsSource();gpsDirectoryRefreshing=true;
         gpsDisplayPending.Clear();
-        var folder=Path.Combine(root,"jpg");
-        var previousStamps=gpsDisplayCache.Where(p=>InFolder(p.Key,folder)).ToDictionary(p=>p.Key,p=>p.Value.Stamp,StringComparer.OrdinalIgnoreCase);
+        var previousStamps=gpsDisplayCache.Where(p=>PhotoCollection.ContainsPath(root,p.Key)).ToDictionary(p=>p.Key,p=>p.Value.Stamp,StringComparer.OrdinalIgnoreCase);
         foreach(var path in previousStamps.Keys)gpsDisplayCache.Remove(path);
         foreach(var file in files)gpsDisplayPending.Add(file);
         gpsInfo.Tag=null;

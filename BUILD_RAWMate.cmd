@@ -2,6 +2,8 @@
 setlocal
 set "SOURCE=%~dp0RAWMate.cs"
 set "OUTPUT=%~dp0RAWMate.exe"
+rem Optional isolated output allows formal smoke before replacing the installed EXE.
+if not "%~1"=="" set "OUTPUT=%~f1"
 set "BUILD_OUTPUT=%~dp0RAWMate-App.exe"
 set "CSC=%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
 

@@ -1,5 +1,9 @@
 # RAWMate 1.4 去留模型
 
+本页记录历史 1.4 语义。1.5.1 将下述 root\jpg/root\arw 范围替换为 Collection Root 内实际路径与相对 scope PairKey，其他回收站、R survivor、互斥状态、v2 完整路径持久化语义不变；详见 ARCHITECTURE.md。旧 1.4/1.5 证据保留。
+
+递归分类逐项将 P/J/R/X、RAW survivor、selection/current 路径键迁移到实际父目录下的类型目录，取消分类做反向迁移；保存状态失败回移并停止剩余。分类不会执行 J/R/X 清理，不删除空或非空目录。
+
 ## 状态
 
 每张 JPG 作为决定入口，最终状态互斥：

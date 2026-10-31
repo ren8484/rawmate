@@ -2,6 +2,12 @@
 
 ## 1. 测试候选
 
+### 1.5.1 发布
+
+递归功能已验收后只同步版本元数据（Assembly/FileVersion 1.5.1.0，Informational/ProductVersion 1.5.1），冻结业务实现。重新构建 Test 并运行 134 递归 / 178 GPS / 78 UX / 61 Cull / 40 Refresh、CreateGpsIfd 9/837/18、integration/evidence/performance safety。原 1.5/1.4.1 FAIL/BLOCKED 证据不改写。
+
+正式构建前备份旧 RAWMate.exe 并核对 SHA；`BUILD_RAWMate.cmd "C:\rawmate\test-output\<release-run>\candidate\RAWMate.exe"` 将同一个正式构建输出到隔离目录。仅在全部脚本及该正式候选的递归/分类/还原/决定持久化/GPS/重启冒烟 PASS，原片/基准保护与日志 PASS 后，才原子替换 C:\rawmate\RAWMate.exe。任何失败停止，保留旧正式 EXE。最后 push main、注解 tag v1.5.1、CI、Release 单 EXE 与下载 SHA 复核。
+
 ### 1.5 的当前保护基准
 
 发布必须使用专用 `test-output/release-baseline-1.5/` 冻结夹具，不能要求用户长期保留活跃图库。`release-baseline-1.5-manifest.json` 记录 relative path、size、SHA256、role、GPS state、相关结构；manifest 自身 SHA 单独绑定。`tests/Verify-ReleaseBaseline.ps1 -BaselineRoot <冻结目录> -ManifestSha256 <冻结 SHA>` 在开始/结束检查每项身份。baseline 不写入；GPS/mutation/evidence 只用新的 working copy，保留失败材料。

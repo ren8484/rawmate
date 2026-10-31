@@ -114,17 +114,23 @@ internal static class GpsUxGridTests {
   Check((string)Field(state,"activeFilter")=="undecided"&&(string)Field(state,"gallerySortMode")=="capture_desc","GPS UI keeps filter / sort");
   Check((string)Field(state,"currentSingleFile")==b&&(double)Field(state,"singleZoom")==1.75&&!(bool)Field(state,"advanceToUndecided"),"GPS UI keeps current / zoom / browse mode");
   string now=File.ReadAllText(Path.Combine(Path.GetDirectoryName(Path.GetDirectoryName(root)),"..","RAWMate.cs")).Replace("\r\n","\n");
-  // Six unchanged safety classes retain the pre-UX hashes. The user-authorized
+  // The recursive collection request changes only ValidateJpg's membership
+  // predicate/message; CheckPath, identities and write/private gates stay frozen.
+  // Five unchanged safety classes retain the pre-UX hashes. The user-authorized
   // no-GPS-IFD implementation changes only Adapter's expected-coordinate argument
   // and JpgGpsIntegrity; their new bindings are backed by categorized mutation
   // tests, real-copy transactions, and an independently frozen ExistingGps body.
-  string[] approvedHashes={"C467BE1471AEEE107A7B24C677AFD66878A1E0F063F65138A5D18AC812E55773","430DB1A0A5E55C09D090C580860AD27E60ECBB22167821057842AA947232E78F","3924481A6E0D2716AA4978F883C86F9C5AFD29F834D5C55613EE62681ED9B040","7A57642BDA956CC04243715A96496CB0F4441BE27C90BD35E840669E6585698E","533A1CC228C343677D3A1BAF063E57E13BED69A1DB89C288461ABBC6EE9A1C8D","3574200F575807D7891048B9AEC99E80DB6946651232A9B3C2CA12EC59246100","DB5DFC1EAC6CAC71748654FF838D82DA2638F27F26A5B036493E195BEA535EC4","2A0F287E74A0EC832B6190678C59F461412E927295188276215FD066080EF0FA"};int approvedIndex=0;
+  string[] approvedHashes={"C467BE1471AEEE107A7B24C677AFD66878A1E0F063F65138A5D18AC812E55773","430DB1A0A5E55C09D090C580860AD27E60ECBB22167821057842AA947232E78F","3924481A6E0D2716AA4978F883C86F9C5AFD29F834D5C55613EE62681ED9B040","4EEB11EE68D14B3B4C7FAF57D1AC5EC71ECB1D3DB5EEE6283D5DB4A1537CDD61","533A1CC228C343677D3A1BAF063E57E13BED69A1DB89C288461ABBC6EE9A1C8D","3574200F575807D7891048B9AEC99E80DB6946651232A9B3C2CA12EC59246100","DB5DFC1EAC6CAC71748654FF838D82DA2638F27F26A5B036493E195BEA535EC4","2A0F287E74A0EC832B6190678C59F461412E927295188276215FD066080EF0FA"};int approvedIndex=0;
   string committed=now.Substring(now.IndexOf("    private void GpsCommitted("));committed=committed.Substring(0,committed.IndexOf("    private void ShowGpsBatchResult("));
   Check(!new[]{"SetDecision(","ToggleTile(","RebuildUi(","RefreshCurrentFolder(","activeFilter=","gallerySortMode=","selectedFiles.Clear","singleZoom=","LoadSinglePhoto("}.Any(committed.Contains),"real commit callback has no cull/navigation/selection/filter/sort/zoom reset");
   Check(committed.Contains("RemoveImageCachesForPaths(new[]{file})")&&!committed.Contains("Clear("),"real commit evicts target only");
   foreach(string type in new[]{"ExifToolProcessRunner","ApprovedExifToolRunner","ExifToolAdapter","GpsFileSafety","GpsEditTarget","GpsEditPlan","GpsFileTransaction","JpgGpsIntegrity"}) {
    Func<string,string> block=delegate(string text){var m=System.Text.RegularExpressions.Regex.Match(text,"(?m)^internal (?:sealed |static )?class "+type+"\\b");if(!m.Success)throw new Exception(type);var next=System.Text.RegularExpressions.Regex.Match(text.Substring(m.Index+m.Length),"(?m)^internal (?:sealed |static )?(?:class|enum|interface) ");return text.Substring(m.Index,next.Success?m.Length+next.Index:text.Length-m.Index).Trim();};
    using(var sha=System.Security.Cryptography.SHA256.Create())Check(BitConverter.ToString(sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(block(now)))).Replace("-","")==approvedHashes[approvedIndex++],"approved safety class byte-equivalent: "+type);
+   if(type=="GpsFileSafety"){
+    string original=block(now).Replace("!PhotoCollection.ContainsPath(root, jpg)","!Same(Path.GetDirectoryName(jpg), Path.Combine(root, \"jpg\"))").Replace("GPS JPG 必须是当前集合根目录内的正式照片。","GPS JPG 必须位于当前 root\\\\jpg。");
+    using(var sha=System.Security.Cryptography.SHA256.Create())Check(BitConverter.ToString(sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(original))).Replace("-","")=="7A57642BDA956CC04243715A96496CB0F4441BE27C90BD35E840669E6585698E","recursive GPS diff limited to membership predicate/message; all other safety bytes unchanged");
+   }
   }
  }
  [STAThread] static int Main(string[] args){try{root=Path.GetFullPath(args[0]);Directory.CreateDirectory(Path.Combine(root,"jpg"));Directory.CreateDirectory(Path.Combine(root,"arw"));typeof(GpsModelTests).GetField("fixture",BindingFlags.Static|BindingFlags.NonPublic).SetValue(null,root);Run();Console.WriteLine("PASS "+count+" GPS UX/Grid assertions (fake writes only); "+root);return 0;}catch(Exception e){Console.Error.WriteLine(e);return 1;}}
