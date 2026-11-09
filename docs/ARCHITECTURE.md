@@ -29,6 +29,8 @@ Program.Main
 
 UI 全由 `Build*` 方法程序化创建。切换网格/单张视图或应用筛选、排序时，`RebuildUi` 会重建可视树；这是因为 WPF 控件不能同时成为两个逻辑树的子节点。重建时需保留业务状态，避免重复同步解码全部缩略图。
 
+1.5.3 的 `BuildGridView` 顶栏使用 Auto 标题 / Star 摘要 / Auto 操作区。摘要 `NoWrap` + `CharacterEllipsis`，不得与按钮一起置于无界 Auto 横向栈；原五个按钮仍调用原工厂和事件。该布局不改变统计/业务状态、窗口最小尺寸或 DPI awareness。
+
 ## 目录数据流
 
 ### 扫描

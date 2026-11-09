@@ -15,8 +15,9 @@ RAWMate 不是 Lightroom 的前置工具，也不绑定任何后期软件。它�
 - 当前主源码是 `RAWMate.cs`，界面、挑片逻辑和 JPG GPS 模块都在这一文件中；没有平行业务源码。
 - 当前构建不依赖 Visual Studio 项目、NuGet、网络服务、数据库或云端账号。
 - 当前用户主要环境：Windows、Sony ILCE-6700，JPG 色彩空间 sRGB，Dell U2725QM 显示器使用 sRGB 模式。
-- 当前版本：`1.5.1`；UI `v1.5.1`，Windows Assembly/FileVersion `1.5.1.0`，ProductVersion `1.5.1`，Git tag `v1.5.1`。
+- 当前版本：`1.5.3`；UI `v1.5.3`，Windows Assembly/FileVersion `1.5.3.0`，ProductVersion `1.5.3`，Git tag `v1.5.3`。
 - 2026-10-31：经用户验收批准，将递归 Collection Root、创建/取消分类和相关测试纳入 1.5.1。功能冻结，仅同步版本/文档；旧 1.5/1.4.1 发布证据保留。
+- 2026-11-09：用户接受G01实机验收，先准备1.5.2，随后明确要求正式升级和发布1.5.3；1.5.2未发布。1.5.3仅含已验收顶栏布局、版本与相关测试/文档；不改业务和安全实现。G03最小窗口EXIF文本裁切为已知非阻断限制；其余DPI组合待条件合适再测，不阻塞此局部修复，也不把未测状态写PASS。原1.5.1正式EXE已备份，隔离正式候选冒烟通过后替换。
 - JPG GPS：WIC 读取/显示、会话来源、单张与网格确认应用、设置中显式配置可选 ExifTool 13.59。五字段写入（经纬度、Ref、GPSStatus=A），不复制 GPS 时间，不覆盖已有 VersionID/MapDatum/Differential。临时副本 + 动态完整性证明 + File.Replace；仅失效目标缓存，不改挑片状态。ARW / XMP 没有 GPS 写入路径。
 - 当前标准本地仓库路径：`C:\rawmate`。旧开发目录只作历史快照，不再作为修改入口。
 - JPG No-GPS-IFD 路径纳入 1.5：经授权扩展 JpgGpsIntegrity 的新建目录结构证明，并把 Adapter 的计划坐标传入证明；已有 GPS IFD 的 MakerNotes 证明主体冻结不变，六个其他安全/事务类保持字节等价。完整 byte ownership、typed pool、HiddenInfo nested 及公共 EXIF range 必须通过，不按机型、固定 tag 数量或 delta 放行。历史失败证据不改写。

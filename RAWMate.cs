@@ -32,9 +32,9 @@ using Forms = System.Windows.Forms;
 [assembly: AssemblyCompany("ren8484")]
 [assembly: AssemblyProduct("RAWMate")]
 [assembly: AssemblyCopyright("Copyright © 2026 ren8484")]
-[assembly: AssemblyVersion("1.5.1.0")]
-[assembly: AssemblyFileVersion("1.5.1.0")]
-[assembly: AssemblyInformationalVersion("1.5.1")]
+[assembly: AssemblyVersion("1.5.3.0")]
+[assembly: AssemblyFileVersion("1.5.3.0")]
+[assembly: AssemblyInformationalVersion("1.5.3")]
 
 internal static class Program
 {
@@ -2045,6 +2045,7 @@ internal sealed class MainWindow : Window
         panel.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         panel.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
         var title = new Grid();
+        title.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         title.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         title.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         title.Children.Add(SectionTitle("图库"));
@@ -2052,13 +2053,19 @@ internal sealed class MainWindow : Window
         galleryCaption.Text = tileFiles.Count > 0 ? tileFiles.Count + " 张 JPG · 单击选择，双击进入单张视图" : "选择集合目录后，递归显示 JPG。";
         galleryCaption.Foreground = Brush("#66778B");
         galleryCaption.VerticalAlignment = VerticalAlignment.Center;
-        topRight.Children.Add(galleryCaption);
+        galleryCaption.HorizontalAlignment = HorizontalAlignment.Stretch;
+        galleryCaption.TextAlignment = TextAlignment.Right;
+        galleryCaption.TextWrapping = TextWrapping.NoWrap;
+        galleryCaption.TextTrimming = TextTrimming.CharacterEllipsis;
+        galleryCaption.Margin = new Thickness(8, 0, 8, 0);
+        Grid.SetColumn(galleryCaption, 1);
+        title.Children.Add(galleryCaption);
         topRight.Children.Add(BuildFilterButton());
         topRight.Children.Add(BuildSortButton());
         topRight.Children.Add(BuildThumbnailSizeButton());
         topRight.Children.Add(BuildViewButton(true));
         topRight.Children.Add(BuildViewButton(false));
-        Grid.SetColumn(topRight, 1);
+        Grid.SetColumn(topRight, 2);
         title.Children.Add(topRight);
         var header=new StackPanel();header.Children.Add(title);panel.Children.Add(header);
         galleryScrollViewer = new ScrollViewer { Margin = new Thickness(0, 12, 0, 0), VerticalScrollBarVisibility = ScrollBarVisibility.Hidden, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, Background = Brushes.Transparent, BorderThickness = new Thickness(0), Padding = new Thickness(8, 8, 18, 8) };

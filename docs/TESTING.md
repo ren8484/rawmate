@@ -8,6 +8,8 @@
 
 ## 1. 构建检查
 
+1.5.3 G01局部修复：版本为Assembly/FileVersion 1.5.3.0、Informational/ProductVersion 1.5.3；UI继续由版本属性派生。运行 `tests\Run-GridHeaderLayoutTests.ps1`（366宽度/摘要模型、7692断言）、原21离屏模型、UX/Grid78及Cull61。测试版和隔离正式候选须检查无旁置RAWMateHeader.png启动、v1.5.3、窄窗口顶栏及Grid/单张切换，关闭后核对状态/error.log与fixture。2026-11-09的G01长摘要实机证据已获验收；G03为已知非阻断限制，其他DPI暂缓、不填PASS。纯布局/版本变更不重跑真实GPS写入；发布报告区分历史实机证据与本轮smoke。1.5.2仅为未发布准备版本。
+
 1.5.1 发布保持已验收递归功能冻结；仅三个程序集版本属性变化。Test 与隔离正式候选均须显示 v1.5.1（Assembly/FileVersion 1.5.1.0，ProductVersion 1.5.1）。正式候选在无 sidecar PNG 目录启动，使用隔离照片并备份/恢复正式用户 state；重启后核对四种决定和当前路径，来源按原设计只在会话内。旧正式 EXE 在全部验证通过前保持不变。
 
 递归集合候选：`tests\Run-RecursiveDirectoryTests.ps1 -ExifToolPath <用户工具> -BaselineRoot <release-baseline-1.5>`。新隔离夹具覆盖四天 JPG=4/RAW=3、同名路径身份、同目录/sibling/别名 PairKey、跨日期禁止配对、歧义、v2 状态独立、真实路径模拟回收、R survivor、确认后新歧义、权限拒绝（仅夹具 DACL，finally 恢复）、junction、temp/dev 排除、普通目录不排除、跨日实拍复制件 GPS 完整事务、增删子目录/来源/metadata、最新 generation、多选与 2000 文件 Dispatcher heartbeat。不会写用户原片或真的回收文件。仍运行 GPS178 / UX>=77 / Cull61 / Refresh40、原 CreateGpsIfd 9/837/18、JPG integration/evidence/safety；不重新生成九张 baseline。

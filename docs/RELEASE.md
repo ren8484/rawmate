@@ -2,6 +2,22 @@
 
 ## 1. 测试候选
 
+### 1.5.3 G01局部修复发布
+
+2026-11-09用户明确授权“把正式版更新成1.5.3并发布release”，覆盖本地正式替换及GitHub发布。1.5.2仅为历史准备版本，不创建其正式tag/Release。范围仍为已验收G01、版本、相关回归和说明；G03与其余暂缓DPI不阻塞，未测组合不填PASS。
+
+本轮Test构建、21离屏模型、366边界模型/7692断言、78 UX/Grid、61 Cull均通过；Test和隔离正式候选完成无旁置header资源启动、v1.5.3、窄窗口及Grid/单张切换smoke。旧1.5.1 EXE备份后，以已验证候选原子替换。最终正式SHA256为 `DB182F53FF243091ABE93292345E0E4399FB2861F71AAE0CFEF2863CBCD2F287`。保护11个状态文件、4张隔离照片/RAW和24个冻结fixture；error.log不变，无GPS写入/实际分类或清理。
+
+发布顺序：审查stage仅源码/docs/tests，commit/合并main/push，注解tag v1.5.3，等待Windows CI，创建正式非预发布Release且仅上传RAWMate.exe，下载复核资产SHA。精确commit/CI/Release URL和最终状态保存于本机 `test-output/release-1.5.3-20261109/RAWMate-1.5.3-Release-Report.md`；GitHub入口为 https://github.com/ren8484/rawmate/releases/tag/v1.5.3 。原1.5.2准备记录及DPI失败历史保留。
+
+### 1.5.2 G01 修复发布准备
+
+2026-11-09 用户接受 G01 测试验收，保留 G03 为已知限制，批准准备 1.5.2。范围冻结为 `BuildGridView` 受限摘要/独立按钮布局、相关测试、版本及说明；不增加功能，不改 DPI Manifest 或业务安全代码。
+
+当前仅准备阶段：标准 Test 构建/版本核验，原21布局模型、新G01边界、UX/Grid、Cull回归及文件保护审查。既有4K/200% G01实机证据可继续引用；版本提升不伪装为新增物理DPI测试。G03与其余暂缓DPI组合不阻塞本次局部修复，未测组合仍保持BLOCKED/NOT TESTED。
+
+正式阶段另行明确授权后才执行：备份正式1.5.1 EXE、隔离正式候选构建/最小冒烟、hash与日志保护、最终文档状态收尾、commit/merge/push/tag v1.5.2、GitHub Release及下载资产SHA复核。出现构建/测试/完整性异常即停止。发布真正完成前 README/PROJECT_CONTEXT 保留正式1.5.1，CHANGELOG的1.5.2保持Unreleased。准备清单见根目录 `RAWMate-1.5.2-Release-Report.md`。
+
 ### 1.5.1 发布
 
 递归功能已验收后只同步版本元数据（Assembly/FileVersion 1.5.1.0，Informational/ProductVersion 1.5.1），冻结业务实现。重新构建 Test 并运行 134 递归 / 178 GPS / 78 UX / 61 Cull / 40 Refresh、CreateGpsIfd 9/837/18、integration/evidence/performance safety。原 1.5/1.4.1 FAIL/BLOCKED 证据不改写。
