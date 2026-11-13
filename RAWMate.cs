@@ -1732,8 +1732,17 @@ internal sealed class MainWindow : Window
             VerticalAlignment = VerticalAlignment.Bottom,
             Margin = new Thickness(2, 8, 0, 0)
         };
-        var appFooter=new DockPanel();appFooter.Children.Add(versionText);
-        var settings=GpsSmallButton("设置");settings.HorizontalAlignment=HorizontalAlignment.Right;settings.Click+=delegate{ShowGpsSettings();};appFooter.Children.Add(settings);
+        // Keep the fixed footer visually separate from the scaled action stack.
+        // On 1920x1080 at 150% the upper Viewbox consumes the full short row;
+        // without this local gap the Settings button touches Execute Cleanup.
+        // The margin belongs to the footer row, so tall/4K layouts and all
+        // control sizing/behavior remain unchanged.
+        var appFooter = new DockPanel { Margin = new Thickness(0, 8, 0, 0) };
+        appFooter.Children.Add(versionText);
+        var settings = GpsSmallButton("设置");
+        settings.HorizontalAlignment = HorizontalAlignment.Right;
+        settings.Click += delegate { ShowGpsSettings(); };
+        appFooter.Children.Add(settings);
         Grid.SetRow(appFooter, 1);
         sidebarLayout.Children.Add(appFooter);
         sidebar.Child = sidebarLayout;
