@@ -4,9 +4,9 @@ RAWMate 是一款本地运行的 Windows JPG + RAW 照片去留筛选器。它�
 
 RAWMate 只负责决定照片留不留；挑完以后，可以继续处理 RAW，也可以直接使用 JPG。
 
-当前版本：`1.5.3`（Windows FileVersion `1.5.3.0`，ProductVersion / 界面 `1.5.3` / `v1.5.3`）。
+当前版本：`1.5.4`（Windows FileVersion `1.5.4.0`，ProductVersion / 界面 `1.5.4` / `v1.5.4`）。
 
-当前测试候选：`rawmate/test` 在 1.5.3 基础上修正 1920×1080、150% 缩放下左栏底部“设置”按钮与上方操作区间距不足的问题。该环境已经实机验收，4K 显示仍待实机确认；这不是正式发布，不改变版本号。
+1.5.4 修复 1920×1080、150% 缩放下左栏底部“设置”与“执行清理”紧贴的问题，为两者留出至少 8 DIP 间距。下载见 [RAWMate 1.5.4 Release](https://github.com/ren8484/rawmate/releases/tag/v1.5.4)。
 
 1.5.3 修复网格顶栏长摘要挤出视图按钮的问题：超长摘要省略，筛选、排序、缩略图及视图按钮保留独立空间。此前1.5.2仅为准备版本，未发布，按用户要求直接以1.5.3发布。下载见 [RAWMate 1.5.3 Release](https://github.com/ren8484/rawmate/releases/tag/v1.5.3)。
 
